@@ -1,0 +1,17 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Tool caches and coverage output
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
