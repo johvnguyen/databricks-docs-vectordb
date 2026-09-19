@@ -7,7 +7,10 @@ authors = [
     { name = "johvnguyen", email = "johvnguyen@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "httpx>=0.28.1",
+    "protego>=0.6.2",
+]
 
 [project.scripts]
 databricks-docs-vectordb = "databricks_docs_vectordb:main"
@@ -19,4 +22,10 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
 ]
+
+[tool.uv.build-backend]
+module-root=""
