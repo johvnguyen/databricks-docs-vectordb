@@ -19,3 +19,4 @@ Thumbs.db
 .venv/
 design-docs/
 data/
+databricks-docs-vectordb/__pycache__/
