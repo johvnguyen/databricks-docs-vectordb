@@ -1,0 +1,41 @@
+User-agent: *
+Allow: /
+
+# Block internal search pages and results
+Disallow: *s=*
+
+Disallow: /aws/en/search-for
+Disallow: /aws/ja/search-for
+Disallow: /aws/pt/search-for
+
+Disallow: /gcp/en/search-for
+Disallow: /gcp/ja/search-for
+Disallow: /gcp/pt/search-for
+
+# Allow crawling of language-specific directories
+Allow: /aws/en/
+Allow: /aws/ja/
+Allow: /aws/pt/
+
+Allow: /gcp/en/
+Allow: /gcp/ja/
+Allow: /gcp/pt/
+
+# Hide archived docs from search indexers
+Disallow: /aws/en/archive/
+Disallow: /aws/ja/archive/
+Disallow: /aws/pt/archive/
+
+Disallow: /gcp/en/archive/
+Disallow: /gcp/ja/archive/
+Disallow: /gcp/pt/archive/
+
+# Specific sitemaps for each cloud+language version
+Sitemap: https://docs.databricks.com/aws/en/sitemap.xml
+Sitemap: https://docs.databricks.com/gcp/en/sitemap.xml
+
+Sitemap: https://docs.databricks.com/aws/ja/sitemap.xml
+Sitemap: https://docs.databricks.com/gcp/ja/sitemap.xml
+
+Sitemap: https://docs.databricks.com/aws/pt/sitemap.xml
+Sitemap: https://docs.databricks.com/gcp/pt/sitemap.xml
