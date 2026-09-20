@@ -1,3 +1,3 @@
-from databricks_docs_vectordb import main
+from databricks_docs_vectordb.cli import main
 
 main()
