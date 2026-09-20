@@ -20,3 +20,4 @@ Thumbs.db
 design-docs/
 data/
 databricks-docs-vectordb/__pycache__/
+*.pyc
