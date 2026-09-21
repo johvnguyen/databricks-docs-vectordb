@@ -300,7 +300,7 @@ async def _interpret(
 
     if status == 200:
         body = response.content
-        if problem := _invalid_body(body):
+        if problem := invalid_body(body):
             raise _Transient(problem, 200, counts_for_breaker=False)
         digest = hashlib.sha256(body).hexdigest()
         common = dict(
@@ -327,7 +327,7 @@ async def _interpret(
     raise _Permanent(f"HTTP {status}", status)
 
 
-def _invalid_body(body: bytes) -> str | None:
+def invalid_body(body: bytes) -> str | None:
     """Why a 200 response doesn't look like a docs page, or None if it does."""
     if not _ARTICLE.search(body):
         return "HTTP 200 but the page has no <article> element"

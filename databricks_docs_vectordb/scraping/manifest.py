@@ -296,6 +296,11 @@ class Manifest:
         row = self._conn.execute("SELECT * FROM pages WHERE url = ?", (url,)).fetchone()
         return Page(**dict(row)) if row else None
 
+    def all_pages(self) -> list[Page]:
+        """Every row, ordered by URL."""
+        rows = self._conn.execute("SELECT * FROM pages ORDER BY url")
+        return [Page(**dict(row)) for row in rows]
+
     def pages_with_status(self, status: str, limit: int | None = None) -> list[Page]:
         """Rows in one status, ordered by URL (e.g. to show what failed)."""
         sql = "SELECT * FROM pages WHERE status = ? ORDER BY url"
