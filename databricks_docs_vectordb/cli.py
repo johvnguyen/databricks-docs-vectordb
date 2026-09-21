@@ -22,6 +22,8 @@ from databricks_docs_vectordb.scraping.report import (
 )
 from databricks_docs_vectordb.scraping.robots import RobotsRules
 from databricks_docs_vectordb.scraping.runner import Runner, RunSummary, make_client
+from databricks_docs_vectordb.scraping.verify import format_report as format_verify
+from databricks_docs_vectordb.scraping.verify import verify_snapshot
 
 PROG = "databricks-docs-vectordb"
 PACKAGE_LOGGER = "databricks_docs_vectordb"
@@ -108,6 +110,27 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="show what has been fetched, and what failed (no network)",
     )
+
+    verify = sub.add_parser(
+        "verify",
+        help="check the saved pages against the manifest (no network)",
+        description=(
+            "Check every fetched page: the file exists, matches its recorded "
+            "hash and size, and looks like a docs page; and that no file is "
+            "unaccounted for. Reports every problem; exits 1 if there are any."
+        ),
+    )
+    verify.add_argument(
+        "--by-section",
+        action="store_true",
+        help="also print a table of page features (<article, <h1>, code, tables) "
+        "per source and top-level section",
+    )
+    verify.add_argument(
+        "--complete",
+        action="store_true",
+        help="the crawl should be finished: pages still pending are violations",
+    )
     return parser
 
 
@@ -127,6 +150,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return run_fetch(settings, args)
             case "status":
                 return run_status(settings)
+            case "verify":
+                return run_verify(settings, args)
     except (RuntimeError, ValueError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -278,6 +303,20 @@ def run_status(settings: Settings) -> int:
         if counts["pending"]:
             print(f"{counts['pending']} pages still to fetch: `{PROG} scrape fetch`")
     return 0
+
+
+# -- verify --------------------------------------------------------------
+
+
+def run_verify(settings: Settings, args: argparse.Namespace) -> int:
+    if not settings.manifest_path.exists():
+        raise CliError(
+            f"no manifest at {settings.manifest_path}; run `{PROG} scrape enumerate` first"
+        )
+    with Manifest(settings.manifest_path) as manifest:
+        report = verify_snapshot(settings, manifest, complete=args.complete)
+    print(format_verify(report, settings, by_section=args.by_section))
+    return 0 if report.ok else 1
 
 
 if __name__ == "__main__":

@@ -488,3 +488,108 @@ def test_status_before_enumerate_is_an_error(env, capsys):
     assert main(["scrape", "status"]) == 1
     assert "scrape enumerate" in capsys.readouterr().err
     assert not (env / "manifest.sqlite").exists()  # it must not create one
+
+
+# =========================================================================
+# scrape verify
+# =========================================================================
+
+
+def test_verify_passes_a_clean_snapshot_without_the_network_or_a_contact(
+    enumerated, site, monkeypatch, capsys
+):
+    fetch()
+    monkeypatch.delenv("DATABRICKS_DOCS_CONTACT")
+    site.reset()
+    capsys.readouterr()
+
+    assert main(["scrape", "verify"]) == 0
+
+    out = capsys.readouterr().out
+    assert "checked 32 fetched pages" in out
+    assert out.splitlines()[-1] == "OK"
+    assert len(site.calls) == 0
+
+
+def test_verify_reports_a_corrupted_file_and_exits_nonzero(enumerated, site, capsys):
+    fetch()
+    victim = enumerated / "raw/aws/en/delta/index.html"
+    victim.write_bytes(PAGE.replace(b"hi", b"HI"))
+    capsys.readouterr()
+
+    assert main(["scrape", "verify"]) == 1
+
+    out = capsys.readouterr().out
+    assert f"[hash-mismatch] {AWS}delta/:" in out
+    assert out.splitlines()[-1] == "FAILED: 1 violations"
+
+
+def test_verify_lists_every_problem_in_one_run(enumerated, site, capsys):
+    fetch()
+    (enumerated / "raw/aws/en/delta/index.html").unlink()
+    (enumerated / "raw/stray.html").write_bytes(PAGE)
+    capsys.readouterr()
+
+    assert main(["scrape", "verify"]) == 1
+
+    out = capsys.readouterr().out
+    assert "[missing-file]" in out and "[orphan-file] stray.html" in out
+    assert "violations (2):" in out
+
+
+def test_verify_by_section_prints_the_feature_table(enumerated, site, capsys):
+    fetch()
+    capsys.readouterr()
+
+    assert main(["scrape", "verify", "--by-section"]) == 0
+
+    out = capsys.readouterr().out
+    assert "per-section (fetched pages" in out
+    assert "aws-en/delta" in out and "api/workspace" in out
+    total = next(line for line in out.splitlines() if line.strip().startswith("total"))
+    assert total.split()[1:3] == ["32", "32"]  # 32 pages, all with an <article
+
+
+def test_verify_without_by_section_omits_the_table(enumerated, site, capsys):
+    fetch()
+    capsys.readouterr()
+    main(["scrape", "verify"])
+    assert "per-section" not in capsys.readouterr().out
+
+
+def test_verify_treats_pending_pages_as_fine_unless_told_the_crawl_is_complete(
+    enumerated, site, capsys
+):
+    fetch("--limit", "5")
+    capsys.readouterr()
+
+    assert main(["scrape", "verify"]) == 0
+    assert main(["scrape", "verify", "--complete"]) == 1
+    assert "[pending-remaining]" in capsys.readouterr().out
+
+    fetch()
+    assert main(["scrape", "verify", "--complete"]) == 0
+
+
+def test_verify_before_enumerate_is_an_error_and_creates_nothing(env, capsys):
+    assert main(["scrape", "verify"]) == 1
+    assert "scrape enumerate" in capsys.readouterr().err
+    assert not (env / "manifest.sqlite").exists()
+
+
+def test_verify_changes_nothing_on_disk(enumerated, site):
+    fetch()
+
+    def snapshot():
+        return {
+            p.relative_to(enumerated): (
+                p.stat().st_size,
+                p.read_bytes() if p.suffix == ".html" else None,
+            )
+            for p in enumerated.rglob("*")
+            if p.is_file() and p.suffix != ".sqlite-wal" and p.suffix != ".sqlite-shm"
+        }
+
+    before = snapshot()
+    main(["scrape", "verify", "--by-section"])
+    assert snapshot() == before
