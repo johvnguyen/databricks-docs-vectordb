@@ -398,3 +398,13 @@ def test_counts_and_counts_by_source(manifest):
         "aws-en": Counter(ok=1, pending=2),
         "api": Counter(gone=1),
     }
+
+
+def test_pages_with_status_lists_rows_ordered_by_url_with_an_optional_limit(manifest):
+    manifest.add_pending("aws-en", [C, A, B])
+    manifest.record_failed(C, error="x", attempts=1)
+    manifest.record_failed(A, error="y", attempts=1)
+    assert [p.url for p in manifest.pages_with_status("failed")] == [A, C]
+    assert [p.url for p in manifest.pages_with_status("failed", limit=1)] == [A]
+    assert [p.url for p in manifest.pages_with_status("pending")] == [B]
+    assert manifest.pages_with_status("ok") == []

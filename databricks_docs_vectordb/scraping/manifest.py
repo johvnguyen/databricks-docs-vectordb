@@ -296,6 +296,15 @@ class Manifest:
         row = self._conn.execute("SELECT * FROM pages WHERE url = ?", (url,)).fetchone()
         return Page(**dict(row)) if row else None
 
+    def pages_with_status(self, status: str, limit: int | None = None) -> list[Page]:
+        """Rows in one status, ordered by URL (e.g. to show what failed)."""
+        sql = "SELECT * FROM pages WHERE status = ? ORDER BY url"
+        params: list[str | int] = [status]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return [Page(**dict(row)) for row in self._conn.execute(sql, params)]
+
     def counts(self) -> Counter[str]:
         """Rows per status."""
         rows = self._conn.execute("SELECT status, COUNT(*) AS n FROM pages GROUP BY 1")
