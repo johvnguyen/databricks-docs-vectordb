@@ -293,6 +293,23 @@ def test_record_not_modified_only_advances_checked_at(manifest):
     assert (page.etag, page.sha256) == ("e1", "ab" * 32)
 
 
+def test_record_not_modified_adopts_new_validators_and_keeps_omitted_ones(manifest):
+    manifest.add_pending("aws-en", [A])
+    fetch_ok(manifest, A, etag="old-etag", now=T1)
+    manifest.record_not_modified(A, etag="new-etag", now=T2)
+    page = manifest.get(A)
+    assert page.etag == "new-etag"
+    assert page.last_modified == "Fri, 18 Sep 2026 21:33:20 GMT"  # omitted: kept
+    manifest.record_not_modified(
+        A, last_modified="Sat, 19 Sep 2026 00:00:00 GMT", now=T3
+    )
+    page = manifest.get(A)
+    assert (page.etag, page.last_modified) == (
+        "new-etag",
+        "Sat, 19 Sep 2026 00:00:00 GMT",
+    )
+
+
 def test_record_gone_and_it_is_never_fetched_again(manifest):
     manifest.add_pending("aws-en", [A])
     manifest.record_gone(A, http_status=410, now=T1)

@@ -1,6 +1,4 @@
-import os
 import re
-import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -12,6 +10,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from databricks_docs_vectordb.scraping.config import Settings, Source
+from databricks_docs_vectordb.scraping.files import write_atomic
 from databricks_docs_vectordb.scraping.manifest import STATUSES, Manifest
 from databricks_docs_vectordb.scraping.robots import RobotsRules
 from databricks_docs_vectordb.scraping.urls import parse_sitemap, url_to_rel_path
@@ -94,9 +93,9 @@ def enumerate_sources(
     ]
 
     # Every fetch succeeded and validated: now save the raw copies, then sync.
-    _write_atomic(settings.robots_path, robots_response.content)
+    write_atomic(settings.robots_path, robots_response.content)
     for item in fetched:
-        _write_atomic(item.sitemap_copy, item.sitemap_content)
+        write_atomic(item.sitemap_copy, item.sitemap_content)
 
     results = []
     for item in fetched:
@@ -223,19 +222,3 @@ def _fetch_source(
 def _origin(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}"
-
-
-def _write_atomic(path: Path, data: bytes) -> None:
-    """Write via a temp file and rename, so a crash never leaves a partial file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o644)  # mkstemp creates private (0600) files
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise

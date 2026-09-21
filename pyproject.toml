@@ -34,3 +34,4 @@ module-root=""
 [tool.pytest.ini_options]
 markers = ["network: hits the live Databricks docs site (run with `-m network`)"]
 addopts = "-m 'not network'"
+asyncio_mode = "auto"

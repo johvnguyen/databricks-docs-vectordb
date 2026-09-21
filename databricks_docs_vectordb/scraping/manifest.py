@@ -219,17 +219,30 @@ class Manifest:
         )
 
     def record_not_modified(
-        self, url: str, *, http_status: int = 304, now: str | None = None
+        self,
+        url: str,
+        *,
+        http_status: int = 304,
+        etag: str | None = None,
+        last_modified: str | None = None,
+        now: str | None = None,
     ) -> None:
-        """A 304: the stored body is still current. Only `checked_at` advances."""
-        self._update(
-            url,
-            status="ok",
-            http_status=http_status,
-            checked_at=now or utc_now(),
-            attempts=0,
-            error=None,
-        )
+        """The stored body is still current, so only `checked_at` advances.
+
+        Validators the server sent with the response replace the stored ones;
+        omitted ones are left alone. This matters when a server re-issues an
+        ETag for unchanged content: keeping the old one would make every later
+        conditional request miss.
+        """
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE pages SET status = 'ok', http_status = ?,"
+                " etag = COALESCE(?, etag), last_modified = COALESCE(?, last_modified),"
+                " checked_at = ?, attempts = 0, error = NULL WHERE url = ?",
+                (http_status, etag, last_modified, now or utc_now(), url),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(url)
 
     def record_gone(
         self, url: str, *, http_status: int = 404, now: str | None = None
