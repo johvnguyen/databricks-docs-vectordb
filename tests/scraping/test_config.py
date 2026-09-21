@@ -188,3 +188,28 @@ def test_settings_are_frozen():
     settings = make()
     with pytest.raises(FrozenInstanceError):
         settings.rate = 10.0  # type: ignore[misc]
+
+
+def test_offline_commands_can_load_settings_without_a_contact(no_dotenv):
+    settings = load(no_dotenv, environ={}, require_contact=False)
+    assert settings.contact == ""
+    assert settings.data_dir == Path("data")
+
+
+def test_require_contact_false_still_uses_a_contact_when_there_is_one(no_dotenv):
+    settings = load(no_dotenv, require_contact=False)
+    assert settings.contact == CONTACT
+
+
+def test_a_malformed_contact_is_rejected_even_when_not_required(no_dotenv):
+    with pytest.raises(RuntimeError, match="single line"):
+        load(
+            no_dotenv,
+            environ={CONTACT_ENV_VAR: "a\nb"},
+            require_contact=False,
+        )
+
+
+def test_the_contact_is_required_by_default(no_dotenv):
+    with pytest.raises(RuntimeError, match=CONTACT_ENV_VAR):
+        load(no_dotenv, environ={})

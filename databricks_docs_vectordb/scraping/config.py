@@ -110,13 +110,16 @@ class Settings:
         *,
         environ: Mapping[str, str] | None = None,
         dotenv_path: Path | None = None,
+        require_contact: bool = True,
         **overrides: Any,
     ) -> Self:
         """Build settings from the environment, falling back to `.env`.
 
         Real environment variables win over `.env`. Nothing is written to
         `os.environ`. Overrides set to None are ignored, so CLI flags that were
-        not given can be passed straight through.
+        not given can be passed straight through. Commands that never touch the
+        network can pass `require_contact=False`; their settings then have an
+        empty contact and must not be used to build a User-Agent.
         """
         env_file = dotenv_path if dotenv_path is not None else find_dotenv(usecwd=True)
         env = {
@@ -125,7 +128,7 @@ class Settings:
         }
 
         contact = (env.get(CONTACT_ENV_VAR) or "").strip()
-        if not contact:
+        if not contact and require_contact:
             raise RuntimeError(
                 f"{CONTACT_ENV_VAR} is not set. Add it to .env (see .env.example) "
                 "so requests to Databricks identify who is crawling."
