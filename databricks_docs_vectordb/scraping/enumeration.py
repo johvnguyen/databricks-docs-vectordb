@@ -11,7 +11,8 @@ import httpx
 
 from databricks_docs_vectordb.scraping.config import Settings, Source
 from databricks_docs_vectordb.scraping.files import write_atomic
-from databricks_docs_vectordb.scraping.manifest import STATUSES, Manifest
+from databricks_docs_vectordb.scraping.manifest import Manifest
+from databricks_docs_vectordb.scraping.report import format_manifest
 from databricks_docs_vectordb.scraping.robots import RobotsRules
 from databricks_docs_vectordb.scraping.urls import parse_sitemap, url_to_rel_path
 
@@ -143,9 +144,7 @@ def format_report(result: EnumerateResult) -> str:
             if len(urls) > 5:
                 lines.append(f"  ... and {len(urls) - 5} more ({label})")
     lines.append("manifest:")
-    for source, counts in result.totals.items():
-        summary = ", ".join(f"{counts[s]} {s}" for s in STATUSES if counts[s])
-        lines.append(f"  {source}: {summary}")
+    lines.extend(format_manifest(result.totals))
     return "\n".join(lines)
 
 
