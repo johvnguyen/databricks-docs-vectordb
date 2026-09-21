@@ -158,11 +158,15 @@ class Runner:
         refresh: bool = False,
         limit: int | None = None,
         stale_before: str | None = None,
+        pages: list[Page] | None = None,
         handle_signals: bool = True,
     ) -> RunSummary:
-        pages = self._manifest.next_batch(
-            refresh=refresh, limit=limit, stale_before=stale_before
-        )
+        """Fetch a batch. `pages` replaces the manifest's own selection (and so
+        overrides `limit` and `stale_before`); `refresh` then only labels the log."""
+        if pages is None:
+            pages = self._manifest.next_batch(
+                refresh=refresh, limit=limit, stale_before=stale_before
+            )
         self._selected = len(pages)
         self._started = self._clock()
         logger.info(

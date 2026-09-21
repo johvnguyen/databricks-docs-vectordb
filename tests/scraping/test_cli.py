@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import signal
 import threading
 import time
@@ -593,3 +594,133 @@ def test_verify_changes_nothing_on_disk(enumerated, site):
     before = snapshot()
     main(["scrape", "verify", "--by-section"])
     assert snapshot() == before
+
+
+# =========================================================================
+# scrape fetch --sample
+# =========================================================================
+
+# The mocked site has 32 pending pages in 16 sections; giving every section
+# at least two pages (or its only one) takes 22.
+SECTIONS = 16
+MINIMUM = 22
+
+
+def requested_urls(site) -> list[str]:
+    return [str(call.request.url) for call in site["pages"].calls]
+
+
+def test_sample_fetches_exactly_n_pages_covering_every_section(
+    enumerated, site, capsys
+):
+    capsys.readouterr()
+    assert fetch("--sample", str(MINIMUM)) == 0
+
+    assert site["pages"].call_count == MINIMUM
+    assert (
+        f"sample: {MINIMUM} of 32 candidate pages, from {SECTIONS} sections"
+        in log_text(enumerated)
+    )
+    capsys.readouterr()
+    assert main(["scrape", "verify", "--by-section"]) == 0
+    table = capsys.readouterr().out
+    rows = [
+        line.split()
+        for line in table.splitlines()
+        if line.strip().startswith(("aws-en/", "api/"))
+    ]
+    assert len(rows) == SECTIONS  # every section of both sources shows up
+    assert all(int(row[1]) >= 1 for row in rows)
+    assert sum(int(row[1]) for row in rows) == MINIMUM
+
+
+def test_sample_takes_a_few_more_when_n_is_larger(enumerated, site):
+    fetch("--sample", "28")
+    assert site["pages"].call_count == 28
+
+
+def test_sample_larger_than_the_pending_pages_fetches_them_all(
+    enumerated, site, capsys
+):
+    capsys.readouterr()
+    assert fetch("--sample", "1000") == 0
+    assert site["pages"].call_count == 32
+    assert "all: 32 ok" in capsys.readouterr().out
+
+
+def test_a_sample_too_small_to_cover_every_section_is_refused_with_the_number_needed(
+    enumerated, site, capsys
+):
+    capsys.readouterr()
+
+    assert fetch("--sample", "10") == 1
+
+    err = capsys.readouterr().err
+    assert "--sample 10 is too small" in err
+    assert f"all {SECTIONS} sections" in err
+    assert f"--sample {MINIMUM}" in err
+    assert site["pages"].call_count == 0
+    with Manifest(enumerated / "manifest.sqlite") as m:
+        assert m.counts()["pending"] == 32  # nothing was touched
+
+
+def test_the_same_pending_pages_always_give_the_same_sample(enumerated, site):
+    fetch("--sample", "25")
+    first = set(requested_urls(site))
+
+    shutil.rmtree(enumerated)  # start over from a fresh manifest
+    assert main(["scrape", "enumerate"]) == 0
+    site["pages"].reset()
+    fetch("--sample", "25")
+
+    assert set(requested_urls(site)) == first
+    assert len(first) == 25
+
+
+def test_a_second_sample_draws_only_from_what_is_still_pending(enumerated, site):
+    fetch("--sample", str(MINIMUM))
+    fetch("--sample", str(MINIMUM))  # 10 pages left, fewer than N: takes them all
+
+    requested = requested_urls(site)
+    assert len(requested) == 32 and len(set(requested)) == 32  # nothing twice
+    with Manifest(enumerated / "manifest.sqlite") as m:
+        assert m.counts()["ok"] == 32
+
+
+def test_sample_with_refresh_samples_from_fetched_pages_too(enumerated, site):
+    site["pages"].mock(side_effect=conditional)
+    fetch()
+    site["pages"].reset()
+    site["pages"].mock(side_effect=conditional)
+
+    assert fetch("--refresh", "--sample", str(MINIMUM)) == 0
+
+    assert site["pages"].call_count == MINIMUM
+    assert all(c.request.headers["if-none-match"] == ETAG for c in site["pages"].calls)
+    assert f"completed: {MINIMUM}/{MINIMUM} pages ({MINIMUM} not_modified)" in log_text(
+        enumerated
+    )
+
+
+def test_sample_and_limit_cannot_be_combined(env):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["scrape", "fetch", "--sample", "30", "--limit", "5"])
+    assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "many", "2.5"])
+def test_sample_must_be_a_positive_whole_number(env, value):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["scrape", "fetch", "--sample", value])
+    assert excinfo.value.code == 2
+
+
+def test_the_sample_is_fetched_in_a_mixed_order_so_an_early_stop_spans_sections(
+    enumerated, site
+):
+    fetch("--sample", "28", "--concurrency", "1")
+    first_eight = requested_urls(site)[:8]
+    prefixes = {
+        url.split("/")[3:6] and "/".join(url.split("/")[3:6]) for url in first_eight
+    }
+    assert len(prefixes) >= 4

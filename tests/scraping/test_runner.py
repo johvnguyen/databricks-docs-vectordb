@@ -510,6 +510,39 @@ async def test_limit_and_refresh_choose_the_pages(tmp_path, robots, make_manifes
     assert sorted(fetch.calls) == u  # everything ok or still pending
 
 
+async def test_explicit_pages_replace_the_manifests_own_selection(
+    tmp_path, robots, make_manifest
+):
+    settings = make_settings(tmp_path)
+    manifest = make_manifest(6, settings)
+    u = urls(6)
+    chosen = [manifest.get(u[4]), manifest.get(u[1])]
+
+    fetch = scripted(lambda url: result(url))
+    summary = await runner_with(manifest, settings, robots, fetch).run(
+        pages=chosen,
+        limit=1,
+        handle_signals=False,  # limit is ignored when pages are given
+    )
+
+    assert sorted(fetch.calls) == sorted([u[1], u[4]])
+    assert (summary.selected, summary.processed) == (2, 2)
+    assert manifest.counts() == Counter(ok=2, pending=4)
+
+
+async def test_an_empty_explicit_list_fetches_nothing_even_with_pages_pending(
+    tmp_path, robots, make_manifest
+):
+    settings = make_settings(tmp_path)
+    manifest = make_manifest(3, settings)
+    fetch = scripted(lambda url: result(url))
+    summary = await runner_with(manifest, settings, robots, fetch).run(
+        pages=[], handle_signals=False
+    )
+    assert fetch.calls == [] and summary.selected == 0
+    assert manifest.counts() == Counter(pending=3)
+
+
 async def test_stale_before_is_passed_through_to_the_selection(
     tmp_path, robots, make_manifest
 ):

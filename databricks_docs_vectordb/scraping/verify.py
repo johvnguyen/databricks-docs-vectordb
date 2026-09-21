@@ -15,7 +15,7 @@ _H1 = re.compile(rb"<h1[\s>]")
 _CODE = re.compile(rb"<pre[\s>]")
 _TABLE = re.compile(rb"<table[\s>]")
 
-TOP_LEVEL = "(top level)"
+TOP_LEVEL = "(top-level)"
 
 
 @dataclass(frozen=True)

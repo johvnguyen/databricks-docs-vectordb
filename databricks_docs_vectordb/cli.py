@@ -15,13 +15,14 @@ from databricks_docs_vectordb.scraping.enumeration import (
     enumerate_sources,
     format_report,
 )
-from databricks_docs_vectordb.scraping.manifest import Manifest
+from databricks_docs_vectordb.scraping.manifest import Manifest, Page
 from databricks_docs_vectordb.scraping.report import (
     format_manifest,
     format_problems,
 )
 from databricks_docs_vectordb.scraping.robots import RobotsRules
 from databricks_docs_vectordb.scraping.runner import Runner, RunSummary, make_client
+from databricks_docs_vectordb.scraping.sampling import sample_pages
 from databricks_docs_vectordb.scraping.verify import format_report as format_verify
 from databricks_docs_vectordb.scraping.verify import verify_snapshot
 
@@ -77,11 +78,21 @@ def build_parser() -> argparse.ArgumentParser:
             "now) and to run again: finished pages are not fetched twice."
         ),
     )
-    fetch.add_argument(
+    size = fetch.add_mutually_exclusive_group()
+    size.add_argument(
         "--limit",
         type=positive_int,
         metavar="N",
         help="fetch at most N pages, then stop (default: all)",
+    )
+    size.add_argument(
+        "--sample",
+        type=positive_int,
+        metavar="N",
+        help="fetch about N pages spread across every section of every source "
+        "(at least 2 per section, a few more from the largest); the same "
+        "pending pages always give the same sample. Refuses an N too small to "
+        "cover every section and says how many it needs",
     )
     fetch.add_argument(
         "--refresh",
@@ -191,7 +202,8 @@ def run_fetch(settings: Settings, args: argparse.Namespace) -> int:
             logging.getLogger(PACKAGE_LOGGER).info(
                 "requeued %d failed page%s", requeued, "" if requeued == 1 else "s"
             )
-        summary = asyncio.run(crawl(settings, manifest, robots, args))
+        pages = choose_sample(settings, manifest, args) if args.sample else None
+        summary = asyncio.run(crawl(settings, manifest, robots, args, pages))
         totals = manifest.counts_by_source()
         failed = manifest.counts()["failed"]
 
@@ -203,15 +215,32 @@ def run_fetch(settings: Settings, args: argparse.Namespace) -> int:
     return EXIT_CODES[summary.status]
 
 
+def choose_sample(
+    settings: Settings, manifest: Manifest, args: argparse.Namespace
+) -> list[Page]:
+    """The pages `--sample N` will fetch, drawn from what would be fetched anyway."""
+    candidates = manifest.next_batch(refresh=args.refresh)
+    sample = sample_pages(candidates, settings.sources, args.sample)
+    logging.getLogger(PACKAGE_LOGGER).info(
+        "sample: %d of %d candidate pages, from %d sections (%d needed for 2 per section)",
+        len(sample.pages),
+        sample.candidates,
+        sample.sections,
+        sample.minimum,
+    )
+    return sample.pages
+
+
 async def crawl(
     settings: Settings,
     manifest: Manifest,
     robots: RobotsRules,
     args: argparse.Namespace,
+    pages: list[Page] | None = None,
 ) -> RunSummary:
     async with make_client(settings) as client:
         runner = Runner(client, settings, manifest, robots)
-        return await runner.run(refresh=args.refresh, limit=args.limit)
+        return await runner.run(refresh=args.refresh, limit=args.limit, pages=pages)
 
 
 def follow_up(summary: RunSummary, failed: int) -> list[str]:
