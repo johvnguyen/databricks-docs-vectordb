@@ -130,6 +130,7 @@ def test_defaults_match_the_design_doc():
     assert (settings.connect_timeout, settings.read_timeout) == (10.0, 30.0)
     assert settings.max_redirects == 5
     assert settings.max_attempts == 5
+    assert settings.retry_after_max == 300.0
     assert (
         settings.breaker_threshold,
         settings.breaker_cooldown,
@@ -162,6 +163,7 @@ def test_source_urls_are_consistent(source):
         {"max_attempts": 0},
         {"backoff_base": 0},
         {"backoff_max": 0},
+        {"retry_after_max": 0},
         {"breaker_threshold": 0},
         {"breaker_max_trips": 0},
         {"progress_every": 0},

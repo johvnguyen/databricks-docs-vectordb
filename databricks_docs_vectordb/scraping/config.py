@@ -49,6 +49,7 @@ class Settings:
     max_attempts: int = 5
     backoff_base: float = 1.0
     backoff_max: float = 60.0
+    retry_after_max: float = 300.0  # longest Retry-After we'll wait out
 
     breaker_threshold: int = 10  # consecutive failures before it trips
     breaker_cooldown: float = 600.0
@@ -65,6 +66,7 @@ class Settings:
             "max_attempts",
             "backoff_base",
             "backoff_max",
+            "retry_after_max",
             "breaker_threshold",
             "breaker_max_trips",
             "progress_every",
