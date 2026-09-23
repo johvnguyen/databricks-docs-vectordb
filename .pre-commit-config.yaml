@@ -2,8 +2,11 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
+      # robots.txt fixture is a verbatim copy of the live file; never rewrite it.
       - id: trailing-whitespace
+        exclude: ^tests/fixtures/robots\.txt$
       - id: end-of-file-fixer
+        exclude: ^tests/fixtures/robots\.txt$
       - id: check-yaml
       - id: check-added-large-files
 
