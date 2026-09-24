@@ -1,0 +1,212 @@
+<!doctype html><html lang=en dir=ltr class="docs-wrapper plugin-docs plugin-id-default docs-version-current docs-doc-page docs-doc-id-delta/index" data-has-hydrated=false><head><meta charset=UTF-8><meta name=generator content="Docusaurus v3.9.2"><title data-rh=true>What is Delta Lake in Databricks? | Databricks on AWS</title><meta data-rh=true name=viewport content="width=device-width, initial-scale=1.0"/><meta data-rh=true property=og:image content=https://docs.databricks.com/aws/en/img/og-image.png /><meta data-rh=true name=twitter:image content=https://docs.databricks.com/aws/en/img/og-image.png /><meta data-rh=true property=og:url content=https://docs.databricks.com/aws/en/delta/ /><meta data-rh=true property=og:locale content=en /><meta data-rh=true property=og:locale:alternate content=ja /><meta data-rh=true property=og:locale:alternate content=pt /><meta data-rh=true property=og:locale:alternate content=fr /><meta data-rh=true name=docusaurus_locale content=en /><meta data-rh=true name=docsearch:language content=en /><meta data-rh=true name=twitter:card content=summary /><meta data-rh=true name=docusaurus_version content=current /><meta data-rh=true name=docusaurus_tag content=docs-default-current /><meta data-rh=true name=docsearch:version content=current /><meta data-rh=true name=docsearch:docusaurus_tag content=docs-default-current /><meta data-rh=true property=og:title content="What is Delta Lake in Databricks? | Databricks on AWS"/><meta data-rh=true name=description content="Delta Lake is the default open-source storage format for all Databricks tables, providing ACID transactions, scalable metadata handling, and unified support for batch and streaming workloads."/><meta data-rh=true property=og:description content="Delta Lake is the default open-source storage format for all Databricks tables, providing ACID transactions, scalable metadata handling, and unified support for batch and streaming workloads."/><link data-rh=true rel=icon href=/aws/en/favicon.ico /><link data-rh=true rel=canonical href=https://docs.databricks.com/aws/en/delta/ /><link data-rh=true rel=alternate href=https://docs.databricks.com/aws/en/delta/ hreflang=en /><link data-rh=true rel=alternate href=https://docs.databricks.com/aws/ja/delta/ hreflang=ja /><link data-rh=true rel=alternate href=https://docs.databricks.com/aws/pt/delta/ hreflang=pt /><link data-rh=true rel=alternate href=https://docs.databricks.com/aws/fr/delta/ hreflang=fr /><link data-rh=true rel=alternate href=https://docs.databricks.com/aws/en/delta/ hreflang=x-default /><script data-rh=true type=application/ld+json>{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","item":"https://docs.databricks.com/aws/en/tables/","name":"Tables","position":1},{"@type":"ListItem","item":"https://docs.databricks.com/aws/en/delta/","name":"Delta Lake","position":2}]}</script><link rel=preconnect href=https://www.googletagmanager.com><script>window.dataLayer=window.dataLayer||[],function(e,t,a,n,r){e[n]=e[n]||[],e[n].push({"gtm.start":new Date().getTime(),event:"gtm.js"});var d=t.getElementsByTagName(a)[0],g=t.createElement(a);g.async=!0,g.src="https://www.googletagmanager.com/gtm.js?id="+r+("dataLayer"!=n?"&l="+n:""),d.parentNode.insertBefore(g,d)}(window,document,"script","dataLayer","GTM-TWTKQQ")</script><link rel=stylesheet href=/aws/en/assets/css/styles.54740e83.css /><script src=/aws/en/assets/js/runtime~main.33cae0b8.js defer></script><script src=/aws/en/assets/js/main.3992ba62.js defer></script></head><body class=navigation-with-keyboard><noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-TWTKQQ" height=0 width=0 style=display:none;visibility:hidden></iframe></noscript>
+
+
+<svg style="display: none;"><defs>
+<symbol id=theme-svg-external-link viewBox="0 0 24 24"><path fill=currentColor d="M21 13v10h-21v-19h12v2h-10v15h17v-8h2zm3-12h-10.988l4.035 4-6.977 7.07 2.828 2.828 6.977-7.07 4.125 4.172v-11z"/></symbol>
+</defs></svg>
+<script>!function(){var t=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();document.documentElement.setAttribute("data-theme",t||"light"),document.documentElement.setAttribute("data-theme-choice",t||"light")}(),function(){try{for(var[t,e]of new URLSearchParams(window.location.search).entries())if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script><div id=__docusaurus><link rel=preload as=image href=/aws/en/img/logo.svg /><link rel=preload as=image href=/aws/en/img/logo-dark.svg /><div role=region aria-label="Skip to main content"><a class=skipToContent_lXOi href=#__docusaurus_skipToContent_fallback>Skip to main content</a></div><nav aria-label=Main class="theme-layout-navbar navbar navbar--fixed-top"><div class=navbar__inner><div class="theme-layout-navbar-left navbar__items"><button aria-label="Toggle navigation bar" aria-expanded=false class="navbar__toggle clean-btn" type=button><svg width=30 height=30 viewBox="0 0 30 30" aria-hidden=true><path stroke=currentColor stroke-linecap=round stroke-miterlimit=10 stroke-width=2 d="M4 7h22M4 15h22M4 23h22"/></svg></button><a href=https://www.databricks.com target=_blank rel="noopener noreferrer" class=navbar__brand><div class=navbar__logo><img src=/aws/en/img/logo.svg alt="Databricks Logo" class="themedComponent_jdCo themedComponent--light_VXss"/><img src=/aws/en/img/logo-dark.svg alt="Databricks Logo" class="themedComponent_jdCo themedComponent--dark_X4V0"/></div></a><a class="navbar__item navbar__link" href=/aws/en/introduction/>Get started</a><a aria-current=page class="navbar__item navbar__link navbar__link--active" href=/aws/en/>Guides</a><a class="navbar__item navbar__link" href=/aws/en/getting-started/connect/>Develop</a><a class="navbar__item navbar__link" href=/aws/en/reference/api>Reference</a><a class="navbar__item navbar__link" href=/aws/en/resources/>Resources</a><a class="navbar__item navbar__link" href=/aws/en/release-notes/>Release notes</a><div class="navbar__item dropdown dropdown--hoverable"><a href=# aria-haspopup=true aria-expanded=false role=button class=navbar__link>Help</a><ul class=dropdown__menu><li><a href=https://help.databricks.com target=_blank rel="noopener noreferrer" class=dropdown__link>Support<svg width=12 height=12 aria-label="(opens in new tab)" class=iconExternalLink_SOoC><use href=#theme-svg-external-link /></svg></a><li><a href=https://kb.databricks.com target=_blank rel="noopener noreferrer" class=dropdown__link>Knowledge Base<svg width=12 height=12 aria-label="(opens in new tab)" class=iconExternalLink_SOoC><use href=#theme-svg-external-link /></svg></a><li><a href=https://community.databricks.com target=_blank rel="noopener noreferrer" class=dropdown__link>Community<svg width=12 height=12 aria-label="(opens in new tab)" class=iconExternalLink_SOoC><use href=#theme-svg-external-link /></svg></a><li><a href=https://customer-academy.databricks.com target=_blank rel="noopener noreferrer" class=dropdown__link>Training<svg width=12 height=12 aria-label="(opens in new tab)" class=iconExternalLink_SOoC><use href=#theme-svg-external-link /></svg></a></ul></div></div><div class="theme-layout-navbar-right navbar__items navbar__items--right"><div class="toggle_AUkn colorModeToggle_iJFx"><button class="clean-btn toggleButton_zA9Z toggleButtonDisabled_oONG" type=button disabled title="system mode" aria-label="Switch between dark and light mode (currently system mode)"><svg viewBox="0 0 24 24" width=24 height=24 aria-hidden=true class="toggleIcon_kUGq lightToggleIcon_vzKq"><path fill=currentColor d="M12,9c1.65,0,3,1.35,3,3s-1.35,3-3,3s-3-1.35-3-3S10.35,9,12,9 M12,7c-2.76,0-5,2.24-5,5s2.24,5,5,5s5-2.24,5-5 S14.76,7,12,7L12,7z M2,13l2,0c0.55,0,1-0.45,1-1s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S1.45,13,2,13z M20,13l2,0c0.55,0,1-0.45,1-1 s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S19.45,13,20,13z M11,2v2c0,0.55,0.45,1,1,1s1-0.45,1-1V2c0-0.55-0.45-1-1-1S11,1.45,11,2z M11,20v2c0,0.55,0.45,1,1,1s1-0.45,1-1v-2c0-0.55-0.45-1-1-1C11.45,19,11,19.45,11,20z M5.99,4.58c-0.39-0.39-1.03-0.39-1.41,0 c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0s0.39-1.03,0-1.41L5.99,4.58z M18.36,16.95 c-0.39-0.39-1.03-0.39-1.41,0c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0c0.39-0.39,0.39-1.03,0-1.41 L18.36,16.95z M19.42,5.99c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06c-0.39,0.39-0.39,1.03,0,1.41 s1.03,0.39,1.41,0L19.42,5.99z M7.05,18.36c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06 c-0.39,0.39-0.39,1.03,0,1.41s1.03,0.39,1.41,0L7.05,18.36z"/></svg><svg viewBox="0 0 24 24" width=24 height=24 aria-hidden=true class="toggleIcon_kUGq darkToggleIcon_MEYm"><path fill=currentColor d="M9.37,5.51C9.19,6.15,9.1,6.82,9.1,7.5c0,4.08,3.32,7.4,7.4,7.4c0.68,0,1.35-0.09,1.99-0.27C17.45,17.19,14.93,19,12,19 c-3.86,0-7-3.14-7-7C5,9.07,6.81,6.55,9.37,5.51z M12,3c-4.97,0-9,4.03-9,9s4.03,9,9,9s9-4.03,9-9c0-0.46-0.04-0.92-0.1-1.36 c-0.98,1.37-2.58,2.26-4.4,2.26c-2.98,0-5.4-2.42-5.4-5.4c0-1.81,0.89-3.42,2.26-4.4C12.92,3.04,12.46,3,12,3L12,3z"/></svg><svg viewBox="0 0 24 24" width=24 height=24 aria-hidden=true class="toggleIcon_kUGq systemToggleIcon_luHP"><path fill=currentColor d="m12 21c4.971 0 9-4.029 9-9s-4.029-9-9-9-9 4.029-9 9 4.029 9 9 9zm4.95-13.95c1.313 1.313 2.05 3.093 2.05 4.95s-0.738 3.637-2.05 4.95c-1.313 1.313-3.093 2.05-4.95 2.05v-14c1.857 0 3.637 0.737 4.95 2.05z"/></svg></button></div><div class=navbarSearchContainer_xryr></div></div></div><div class=navbar__inner><div class=navbar__items><div style="width:calc(var(--doc-sidebar-width) - var(--ifm-navbar-padding-horizontal))"><div class=gcse-search></div></div></div><div class="navbar__items navbar__items--right"><div class="navbar__item dropdown dropdown--hoverable dropdown--right"><a href=# aria-haspopup=true aria-expanded=false role=button class=navbar__link>English</a><ul class=dropdown__menu><li><a class=dropdown__link lang=en target=_self href=/aws/en/delta/>English</a><li><a class=dropdown__link lang=ja target=_self href=/aws/en/aws/ja/delta/>日本語</a><li><a class=dropdown__link lang=pt target=_self href=/aws/en/aws/pt/delta/>Português</a><li><a class=dropdown__link lang=fr target=_self href=/aws/en/aws/fr/delta/>Français</a></ul></div><div class="navbar__item dropdown dropdown--hoverable dropdown--right"><a href=# aria-haspopup=true aria-expanded=false role=button class=navbar__link>AWS</a><ul class=dropdown__menu><li><a href=https://learn.microsoft.com/azure/databricks/delta/ target=_self rel="noopener noreferrer" class=dropdown__link>Azure<svg width=12 height=12 aria-label="(opens in new tab)" class=iconExternalLink_SOoC><use href=#theme-svg-external-link /></svg></a><li><a class=dropdown__link target=_self href=/aws/en/gcp/en/delta/>GCP</a><li><a class=dropdown__link target=_self href=/aws/en/sap>SAP</a></ul></div><a class="tryDatabricksLink tryDatabricksLink_r4AS" href="https://signup.databricks.com/?dbx_source=docs" target=_blank rel=noreferrer>Try Databricks</a></div></div><div role=presentation class=navbar-sidebar__backdrop></div></nav><div id=__docusaurus_skipToContent_fallback class="theme-layout-main main-wrapper mainWrapper_VNTs"><div class=docsWrapper_gFbq><button aria-label="Scroll back to top" class="clean-btn theme-back-to-top-button backToTopButton_P8By" type=button></button><div class=docRoot_a7pW><aside class="theme-doc-sidebar-container docSidebarContainer_OsdH"><div class=sidebarViewport_utEA></div></aside><main class=docMainContainer_Ymwj><div class="container padding-top--md padding-bottom--lg"><div class=row><div class="col docItemCol_z5aJ"><div class=docItemContainer_c0TR><article><div class=wrapper_tK7j><nav class="theme-doc-breadcrumbs breadcrumbsContainer_Jvdz" aria-label=Breadcrumbs><ul class=breadcrumbs><li class=breadcrumbs__item><a aria-label="Home page" class=breadcrumbs__link href=/aws/en/><svg viewBox="0 0 24 24" class=breadcrumbHomeIcon_EobD><path d="M10 19v-5h4v5c0 .55.45 1 1 1h3c.55 0 1-.45 1-1v-7h1.7c.46 0 .68-.57.33-.87L12.67 3.6c-.38-.34-.96-.34-1.34 0l-8.36 7.53c-.34.3-.13.87.33.87H5v7c0 .55.45 1 1 1h3c.55 0 1-.45 1-1z" fill=currentColor /></svg></a><li class=breadcrumbs__item><a class=breadcrumbs__link href=/aws/en/tables/><span>Tables</span></a><li class=breadcrumbs__item><span class=breadcrumbs__link>Table formats</span><li class="breadcrumbs__item breadcrumbs__item--active"><span class=breadcrumbs__link>Delta Lake</span></ul></nav></div><div class="tocCollapsible_UKep theme-doc-toc-mobile tocMobile_G5bF"><button type=button class="clean-btn tocCollapsibleButton_KOlV">On this page</button></div><div class="row margin-bottom--sm theme-doc-footer-edit-meta-row"><div class="col lastUpdated__anC"><span class=theme-last-updated>Last updated<!-- --> on <b><time datetime=2026-09-11T00:00:00.000Z itemprop=dateModified>Sep 11, 2026</time></b></span></div><div class=col></div></div><div class="theme-doc-markdown markdown"><header><h1>What is <!-- -->Delta Lake<!-- --> in <!-- -->Databricks<!-- -->?</h1></header>
+<p>Delta Lake<!-- --> is the optimized storage layer that provides the foundation for tables in a lakehouse on Databricks. <!-- -->Delta Lake<!-- --> is <a href=https://delta.io target=_blank rel="noopener noreferrer" class="">open source software</a> that extends Parquet data files with a file-based transaction log for <a class="" href=/aws/en/lakehouse/acid>ACID transactions</a> and scalable metadata handling. <!-- -->Delta Lake<!-- --> is fully compatible with <!-- -->Apache Spark<!-- --> APIs, and was developed for tight integration with <!-- -->Structured Streaming<!-- -->, allowing you to easily use a single copy of data for both batch and streaming operations and providing incremental processing at scale.</p>
+<p>Delta Lake<!-- --> is the default format for all operations on <!-- -->Databricks<!-- -->. Unless otherwise specified, all tables on <!-- -->Databricks<!-- --> are <!-- -->Delta Lake<!-- --> tables. Databricks originally developed the <!-- -->Delta Lake<!-- --> protocol and continues to actively contribute to the open source project. Many of the optimizations and products in the Databricks platform build upon the guarantees provided by <!-- -->Apache Spark<!-- --> and <!-- -->Delta Lake<!-- -->. For information on optimizations on <!-- -->Databricks<!-- -->, see <a class="" href=/aws/en/optimizations/>Optimization recommendations on <!-- -->Databricks</a>.</p>
+<p>For reference information on <!-- -->Delta Lake<!-- --> SQL commands, see <a class="" href=/aws/en/sql/language-manual/#delta-lake-statements>Delta Lake<!-- --> statements</a>.</p>
+<p>The <!-- -->Delta Lake<!-- --> transaction log has a well-defined open protocol that can be used by any system to read the log. See <a href=https://github.com/delta-io/delta/blob/master/PROTOCOL.md target=_blank rel="noopener noreferrer" class="">Delta Transaction Log Protocol</a>.</p>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=getting-started-with-delta-lake>Getting started with <!-- -->Delta Lake<a href=#getting-started-with-delta-lake class=hash-link aria-label="Direct link to getting-started-with-delta-lake" title="Direct link to getting-started-with-delta-lake" translate=no>​</a></h2>
+<p>All tables on <!-- -->Databricks<!-- --> are <!-- -->Delta Lake<!-- --> tables by default. Whether you're using <!-- -->Apache Spark<!-- --> <a class="" href=/aws/en/getting-started/dataframes>DataFrames</a> or SQL, you get all the benefits of <!-- -->Delta Lake<!-- --> just by saving your data to the lakehouse with default settings.</p>
+<p>For examples of basic <!-- -->Delta Lake<!-- --> operations such as creating tables, reading, writing, and updating data, see <a class="" href=/aws/en/delta/tutorial>Tutorial: Create and manage <!-- -->Delta Lake<!-- --> tables</a>.</p>
+<p>For Databricks recommendations and best practices on using <!-- -->Delta Lake<!-- -->, see <a class="" href=/aws/en/delta/best-practices>Best practices: <!-- -->Delta Lake</a>.</p>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=converting-and-ingesting-data-to-delta-lake>Converting and ingesting data to <!-- -->Delta Lake<a href=#converting-and-ingesting-data-to-delta-lake class=hash-link aria-label="Direct link to converting-and-ingesting-data-to-delta-lake" title="Direct link to converting-and-ingesting-data-to-delta-lake" translate=no>​</a></h2>
+<p>Databricks<!-- --> has many features to accelerate and simplify loading data to your lakehouse.</p>
+<div class=card-list-container><ul>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/getting-started/data-pipeline-get-started>Tutorial: Build an ETL pipeline with <!-- -->Lakeflow pipelines</a></li>
+<li class="">Build an end-to-end ETL pipeline using <!-- -->Lakeflow pipelines<!-- -->.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/ingestion/cloud-object-storage/onboard-data>Set up incremental ingestion from <!-- -->Amazon S3</a></li>
+<li class="">Set up incremental ingestion from cloud storage using Auto Loader and <!-- -->Lakeflow pipelines<!-- -->.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/ldp/concepts/streaming-tables>Streaming tables</a></li>
+<li class="">Use streaming tables for append-only ingestion and low-latency streaming in <!-- -->Lakeflow pipelines<!-- -->.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/ingestion/cloud-object-storage/copy-into/>Get started using COPY INTO to load data</a></li>
+<li class="">Load data incrementally and idempotently from cloud storage using SQL.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/ingestion/cloud-object-storage/auto-loader/>What is <!-- -->Auto Loader<!-- -->?</a></li>
+<li class="">Ingest files from cloud storage incrementally as they arrive.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/ingestion/create-or-modify-table>Create or modify a table using file upload</a></li>
+<li class="">Upload files and create tables from the <!-- -->Databricks<!-- --> UI.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/ingestion/data-migration/clone-parquet>Incrementally clone Parquet and <!-- -->Apache Iceberg<!-- --> tables to <!-- -->Delta Lake</a></li>
+<li class="">Incrementally clone Parquet or <!-- -->Apache Iceberg<!-- --> tables to <!-- -->Delta Lake<!-- -->.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/ingestion/data-migration/convert-to-delta>Convert to <!-- -->Delta Lake</a></li>
+<li class="">One-time conversion of Parquet or <!-- -->Apache Iceberg<!-- --> tables to <!-- -->Delta Lake<!-- -->.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/integrations/>Technology partners</a></li>
+<li class="">Connect third-party partners and tools to your <!-- -->Databricks<!-- --> lakehouse.</li>
+</ul>
+</li>
+</ul></div>
+<p>For a full list of ingestion options, see <a class="" href=/aws/en/ingestion/>Choose a standard connector</a>.</p>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=updating-and-modifying-delta-lake-tables><a id=updates class=db-defined-anchor></a>Updating and modifying <!-- -->Delta Lake<!-- --> tables<a href=#updating-and-modifying-delta-lake-tables class=hash-link aria-label="Direct link to updating-and-modifying-delta-lake-tables" title="Direct link to updating-and-modifying-delta-lake-tables" translate=no>​</a></h2>
+<p>Atomic transactions with <!-- -->Delta Lake<!-- --> allow you to use many options for updating data and metadata. To avoid corrupting your tables, Databricks recommends that you avoid interacting directly with data and transaction log files in <!-- -->Delta Lake<!-- --> file directories.</p>
+<div class=card-list-container><ul>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/delta/merge>Upsert into a <!-- -->Delta Lake<!-- --> table using merge</a></li>
+<li class="">Upsert data into a <!-- -->Delta Lake<!-- --> table using the merge operation.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/delta/selective-overwrite>Selectively overwrite data with <!-- -->Delta Lake</a></li>
+<li class="">Overwrite subsets of data based on filters and partitions.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/update-schema>Update table schemas with schema evolution</a></li>
+<li class="">Manually or automatically update your table schema without rewriting data.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/features/column-mapping>Rename and drop columns with <!-- -->Delta Lake<!-- --> column mapping</a></li>
+<li class="">Rename or delete columns without rewriting data.</li>
+</ul>
+</li>
+</ul></div>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=incremental-and-streaming-workloads-on-delta-lake>Incremental and streaming workloads on <!-- -->Delta Lake<a href=#incremental-and-streaming-workloads-on-delta-lake class=hash-link aria-label="Direct link to incremental-and-streaming-workloads-on-delta-lake" title="Direct link to incremental-and-streaming-workloads-on-delta-lake" translate=no>​</a></h2>
+<p>Delta Lake<!-- --> is optimized for <!-- -->Structured Streaming<!-- --> on <!-- -->Databricks<!-- -->. <a class="" href=/aws/en/ldp/>Lakeflow pipelines</a> extend built-in capabilities with simplified infrastructure deployment, enhanced scaling, and managed data dependencies.</p>
+<div class=card-list-container><ul>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/structured-streaming/delta-lake>Delta Lake<!-- --> table streaming reads and writes</a></li>
+<li class="">Use <!-- -->Delta Lake<!-- --> tables as sources and sinks for <!-- -->Structured Streaming<!-- --> with <code>readStream</code> and <code>writeStream</code>.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/features/change-data-feed>Use change data feed on <!-- -->Databricks</a></li>
+<li class="">Track row-level changes between versions of a <!-- -->Delta Lake<!-- --> or <!-- -->Apache Iceberg<!-- --> v3 table.</li>
+</ul>
+</li>
+</ul></div>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=querying-previous-versions-of-a-table>Querying previous versions of a table<a href=#querying-previous-versions-of-a-table class=hash-link aria-label="Direct link to Querying previous versions of a table" title="Direct link to Querying previous versions of a table" translate=no>​</a></h2>
+<p>Each write to a <!-- -->Delta Lake<!-- --> table creates a new table version. You can use the transaction log to review modifications to your table and query previous table versions. See <a class="" href=/aws/en/tables/history>Work with table history</a>.</p>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=delta-lake-schema-enhancements>Delta Lake<!-- --> schema enhancements<a href=#delta-lake-schema-enhancements class=hash-link aria-label="Direct link to delta-lake-schema-enhancements" title="Direct link to delta-lake-schema-enhancements" translate=no>​</a></h2>
+<p>Delta Lake<!-- --> validates schema on write, ensuring that all data written to a table matches the requirements you've set.</p>
+<div class=card-list-container><ul>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/schema-enforcement>Schema enforcement</a></li>
+<li class="">Validate data quality by enforcing schema on write.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/constraints>Constraints on <!-- -->Databricks</a></li>
+<li class="">Apply enforced integrity constraints and informational primary key, foreign key, and unique constraints.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/features/generated-columns>Delta Lake<!-- --> generated columns</a></li>
+<li class="">Automatically generate column values using user-specified functions.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/operations/custom-metadata>Enrich tables with custom metadata</a></li>
+<li class="">Add comments and custom metadata to tables and columns to enrich data discovery.</li>
+</ul>
+</li>
+</ul></div>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=managing-files-and-indexing-data-with-delta-lake>Managing files and indexing data with <!-- -->Delta Lake<a href=#managing-files-and-indexing-data-with-delta-lake class=hash-link aria-label="Direct link to managing-files-and-indexing-data-with-delta-lake" title="Direct link to managing-files-and-indexing-data-with-delta-lake" translate=no>​</a></h2>
+<p>Databricks<!-- --> sets many default parameters for <!-- -->Delta Lake<!-- --> that impact the size of data files and number of table versions that are retained in history. <!-- -->Delta Lake<!-- --> uses a combination of metadata parsing and physical data layout to reduce the number of files scanned to fulfill any query.</p>
+<div class=card-list-container><ul>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/clustering>Use liquid clustering for tables</a></li>
+<li class="">Simplify data layout and optimize query performance without partitioning using liquid clustering.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/data-skipping>Data skipping</a></li>
+<li class="">Skip irrelevant files at query time using column statistics, Z-order, and optimized data layout.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/operations/optimize>Optimize data file layout</a></li>
+<li class="">Compact small data files to improve query performance.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/operations/vacuum>Remove unused data files with vacuum</a></li>
+<li class="">Remove stale data files to reduce storage costs.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/operations/auto-ttl>Automatic row deletion with auto time-to-live</a></li>
+<li class="">Automatically delete rows from managed tables after a configurable time period.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/tune-file-size>Control data file size</a></li>
+<li class="">Control target file size manually or enable automatic file size tuning.</li>
+</ul>
+</li>
+</ul></div>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=configuring-and-reviewing-delta-lake-settings>Configuring and reviewing <!-- -->Delta Lake<!-- --> settings<a href=#configuring-and-reviewing-delta-lake-settings class=hash-link aria-label="Direct link to configuring-and-reviewing-delta-lake-settings" title="Direct link to configuring-and-reviewing-delta-lake-settings" translate=no>​</a></h2>
+<p>Databricks<!-- --> stores all data and metadata for <!-- -->Delta Lake<!-- --> tables in cloud object storage. Many configurations can be set at either the table level or within the Spark session. You can review the details of the <!-- -->Delta Lake<!-- --> table to discover what options are configured.</p>
+<div class=card-list-container><ul>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/operations/table-details>Review table details with describe detail</a></li>
+<li class="">View table configurations and metadata using the <code>DESCRIBE DETAIL</code> command.</li>
+</ul>
+</li>
+<li class="">
+<ul>
+<li class=""><a class="" href=/aws/en/tables/table-properties>Table properties reference</a></li>
+<li class="">Reference list of table properties available for <!-- -->Delta Lake<!-- --> tables.</li>
+</ul>
+</li>
+</ul></div>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=data-pipelines-using-delta-lake-and-lakeflow-pipelines>Data pipelines using <!-- -->Delta Lake<!-- --> and <!-- -->Lakeflow pipelines<a href=#data-pipelines-using-delta-lake-and-lakeflow-pipelines class=hash-link aria-label="Direct link to data-pipelines-using-delta-lake-and-lakeflow-pipelines" title="Direct link to data-pipelines-using-delta-lake-and-lakeflow-pipelines" translate=no>​</a></h2>
+<p>Databricks<!-- --> encourages users to leverage a <a class="" href=/aws/en/lakehouse/medallion>medallion architecture</a> to process data through a series of tables as data is cleaned and enriched. <a class="" href=/aws/en/ldp/>Lakeflow pipelines</a> simplify ETL workloads through optimized execution and automated infrastructure deployment and scaling.</p>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=delta-lake-feature-compatibility>Delta Lake<!-- --> feature compatibility<a href=#delta-lake-feature-compatibility class=hash-link aria-label="Direct link to delta-lake-feature-compatibility" title="Direct link to delta-lake-feature-compatibility" translate=no>​</a></h2>
+<p>Not all <!-- -->Delta Lake<!-- --> features are in all versions of <!-- -->Databricks Runtime<!-- -->. For information about <!-- -->Delta Lake<!-- --> versioning, see <a class="" href=/aws/en/tables/features/feature-compatibility>Delta Lake<!-- --> feature compatibility and protocols</a>.</p>
+<h2 class="anchor anchorTargetStickyNavbar_e1Nq" id=delta-lake-api-documentation><a id=delta-api class=db-defined-anchor></a>Delta Lake<!-- --> API documentation<a href=#delta-lake-api-documentation class=hash-link aria-label="Direct link to delta-lake-api-documentation" title="Direct link to delta-lake-api-documentation" translate=no>​</a></h2>
+<p>For most read and write operations on <!-- -->Delta Lake<!-- --> tables, you can use <a class="" href=/aws/en/sql/language-manual/>Spark SQL</a> or <!-- -->Apache Spark<!-- --> <a class="" href=/aws/en/getting-started/dataframes>DataFrame</a> APIs.</p>
+<p>For <!-- -->Delta Lake<!-- -->-specific SQL statements, see <a class="" href=/aws/en/sql/language-manual/#delta-lake-statements>Delta Lake<!-- --> statements</a>.</p>
+<p>Databricks<!-- --> ensures binary compatibility with <!-- -->Delta Lake<!-- --> APIs in <!-- -->Databricks Runtime<!-- -->. To view the <!-- -->Delta Lake<!-- --> API version packaged in each <!-- -->Databricks Runtime<!-- --> version, see the <strong>System environment</strong> section on the relevant article in the <a class="" href=/aws/en/release-notes/runtime/>Databricks Runtime release notes</a>. For documentation on <!-- -->Delta Lake<!-- --> APIs for Python, Scala, and Java, see the <a href=https://docs.delta.io/latest/delta-apidoc.html#delta-spark target=_blank rel="noopener noreferrer" class="">OSS Delta Lake documentation</a>.</div></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"></nav></div></div><div class="col col--3"><div class=container_ZLZD><div class=tw-scope><div class="text-[0.8rem] font-bold">On this page</div></div><div class="tableOfContents_XyVD thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href=#getting-started-with-delta-lake class="table-of-contents__link toc-highlight">Getting started with Delta Lake</a><li><a href=#converting-and-ingesting-data-to-delta-lake class="table-of-contents__link toc-highlight">Converting and ingesting data to Delta Lake</a><li><a href=#updating-and-modifying-delta-lake-tables class="table-of-contents__link toc-highlight"><link class=db-defined-anchor>Updating and modifying Delta Lake tables</a><li><a href=#incremental-and-streaming-workloads-on-delta-lake class="table-of-contents__link toc-highlight">Incremental and streaming workloads on Delta Lake</a><li><a href=#querying-previous-versions-of-a-table class="table-of-contents__link toc-highlight">Querying previous versions of a table</a><li><a href=#delta-lake-schema-enhancements class="table-of-contents__link toc-highlight">Delta Lake schema enhancements</a><li><a href=#managing-files-and-indexing-data-with-delta-lake class="table-of-contents__link toc-highlight">Managing files and indexing data with Delta Lake</a><li><a href=#configuring-and-reviewing-delta-lake-settings class="table-of-contents__link toc-highlight">Configuring and reviewing Delta Lake settings</a><li><a href=#data-pipelines-using-delta-lake-and-lakeflow-pipelines class="table-of-contents__link toc-highlight">Data pipelines using Delta Lake and Lakeflow pipelines</a><li><a href=#delta-lake-feature-compatibility class="table-of-contents__link toc-highlight">Delta Lake feature compatibility</a><li><a href=#delta-lake-api-documentation class="table-of-contents__link toc-highlight"><link class=db-defined-anchor>Delta Lake API documentation</a></ul></div></div></div></div></div></main></div></div></div><footer class="theme-layout-footer footer footer--dark"><div class="container container-fluid"><div class="footer__links text--center"><div class=footer__links><a href=https://www.databricks.com/legal/privacynotice target=_blank rel="noopener noreferrer" class=footer__link-item>Privacy Notice<svg width=13.5 height=13.5 aria-label="(opens in new tab)" class=iconExternalLink_SOoC><use href=#theme-svg-external-link /></svg></a><span class=footer__link-separator>·</span><a href=https://www.databricks.com/terms-of-use target=_blank rel="noopener noreferrer" class=footer__link-item>Terms of Use<svg width=13.5 height=13.5 aria-label="(opens in new tab)" class=iconExternalLink_SOoC><use href=#theme-svg-external-link /></svg></a><span class=footer__link-separator>·</span><a href=https://www.databricks.com/legal/modern-slavery-policy-statement target=_blank rel="noopener noreferrer" class=footer__link-item>Modern Slavery Statement<svg width=13.5 height=13.5 aria-label="(opens in new tab)" class=iconExternalLink_SOoC><use href=#theme-svg-external-link /></svg></a><span class=footer__link-separator>·</span><a href=https://www.databricks.com/legal/supplemental-privacy-notice-california-residents target=_blank rel="noopener noreferrer" class=footer__link-item>California Privacy<svg width=13.5 height=13.5 aria-label="(opens in new tab)" class=iconExternalLink_SOoC><use href=#theme-svg-external-link /></svg></a><span class=footer__link-separator>·</span><span class=footer__link-item><a href=javascript:OneTrust.ToggleInfoDisplay()>Your Privacy Choices <img alt="" src=https://www.databricks.com/sites/default/files/2022-12/gpcicon_small.png data-ot-ignore=1 class="dbgpcicon inline-block max-h-[15px] w-auto" width=31 height=15></a></span></div></div><div class="footer__bottom text--center"><div class=footer__copyright>© Databricks 2026. All rights reserved. Apache, Apache Spark, Spark and the Spark logo are trademarks of the <a href=https://www.apache.org/ target=_blank>Apache Software Foundation</a>.</div></div></div></footer></div></body>
