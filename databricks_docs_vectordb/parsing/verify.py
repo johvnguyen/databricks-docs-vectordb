@@ -11,6 +11,7 @@ checks invariants and exits non-zero if any fail.
 
 from dataclasses import dataclass, field
 
+from databricks_docs_vectordb.parsing.chunker import overlap_ceiling
 from databricks_docs_vectordb.parsing.config import Settings
 from databricks_docs_vectordb.parsing.report import (
     SectionStats,
@@ -67,7 +68,7 @@ def verify_store(
     not flagged as orphans here -- Phase 7's job, not this one's.
     """
     report = VerifyReport()
-    ceiling = settings.target_chunk_size + settings.overlap_size
+    ceiling = overlap_ceiling(settings)
 
     for page in manifest.pages_with_status("ok"):
         report.checked += 1

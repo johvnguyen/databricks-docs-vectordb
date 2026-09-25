@@ -193,8 +193,9 @@ def test_an_oversized_chunk_correctly_flagged_is_not_a_violation(
 
 
 def test_a_chunk_within_the_overlap_margin_is_not_flagged(manifest, store, settings):
-    # target=100, overlap=20 -> ceiling=120; 115 is over target but within
-    # the legitimate overlap margin, so it must not be a violation.
+    # target=100, overlap=20 -> ceiling=122 (+2 for the "\n\n" chunker.py
+    # joins overlap with, see chunker.overlap_ceiling); 115 is over target
+    # but within the legitimate overlap margin, so not a violation.
     add_ok(manifest, URL_A)
     chunks = make_page(URL_A, 1)
     chunks[0] = make_chunk(URL_A, 0, chunk_id=chunks[0].chunk_id, text="x" * 115)
@@ -206,10 +207,19 @@ def test_a_chunk_within_the_overlap_margin_is_not_flagged(manifest, store, setti
 def test_a_chunk_just_past_the_ceiling_is_flagged(manifest, store, settings):
     add_ok(manifest, URL_A)
     chunks = make_page(URL_A, 1)
-    chunks[0] = make_chunk(URL_A, 0, chunk_id=chunks[0].chunk_id, text="x" * 121)
+    chunks[0] = make_chunk(URL_A, 0, chunk_id=chunks[0].chunk_id, text="x" * 123)
     store.replace_page_chunks(URL_A, chunks)
     report = verify_store(manifest, store, settings, SOURCES)
     assert kinds(report) == ["chunk-too-large"]
+
+
+def test_a_chunk_exactly_at_the_ceiling_is_not_flagged(manifest, store, settings):
+    add_ok(manifest, URL_A)
+    chunks = make_page(URL_A, 1)
+    chunks[0] = make_chunk(URL_A, 0, chunk_id=chunks[0].chunk_id, text="x" * 122)
+    store.replace_page_chunks(URL_A, chunks)
+    report = verify_store(manifest, store, settings, SOURCES)
+    assert report.ok
 
 
 # -- dangling-neighbor (only reachable by bypassing the store's own -------

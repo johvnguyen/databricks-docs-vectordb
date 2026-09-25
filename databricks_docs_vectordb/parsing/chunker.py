@@ -205,6 +205,27 @@ def _pack_nodes(nodes: Sequence[Node], target: int) -> list[list[Node]]:
 
 # -- overlap -----------------------------------------------------------
 
+_OVERLAP_JOIN = "\n\n"  # separator between prepended overlap and a chunk's own text
+
+
+def overlap_ceiling(settings: Settings) -> int:
+    """The largest a chunk's final stored text can legitimately be once
+    overlap is applied -- what `verify.py` checks `char_count` against
+    before flagging a chunk `chunk-too-large` that isn't marked
+    `is_oversized`.
+
+    Exact for the default "chars" mode: a chunk's own content is at most
+    `target_chunk_size` (or it would already be `is_oversized`), plus at
+    most `overlap_size` characters of the previous chunk's tail, plus the
+    fixed join separator. Only approximate for "heading" mode: restating
+    the previous chunk's `heading_path` has no fixed length, so this uses
+    a generous fixed margin instead of a precise bound -- a known
+    limitation of that mode, not a bug (see parsing.md's revisit triggers).
+    """
+    if settings.overlap_mode == "heading":
+        return settings.target_chunk_size + 200
+    return settings.target_chunk_size + settings.overlap_size + len(_OVERLAP_JOIN)
+
 
 def _apply_overlap(plans: Sequence[_ChunkPlan], settings: Settings) -> list[str]:
     """Each chunk's final text, with configured overlap prepended from the
@@ -225,10 +246,10 @@ def _apply_overlap(plans: Sequence[_ChunkPlan], settings: Settings) -> list[str]
 
 def _prefix_with_tail(previous_text: str, text: str, overlap_size: int) -> str:
     tail = previous_text[-overlap_size:] if overlap_size else ""
-    return f"{tail}\n\n{text}" if tail else text
+    return f"{tail}{_OVERLAP_JOIN}{text}" if tail else text
 
 
 def _prefix_with_heading(heading_path: str, text: str) -> str:
     if not heading_path:
         return text
-    return f'*(continued from "{heading_path}")*\n\n{text}'
+    return f'*(continued from "{heading_path}")*{_OVERLAP_JOIN}{text}'

@@ -1,6 +1,6 @@
 import pytest
 
-from databricks_docs_vectordb.parsing.chunker import chunk_page
+from databricks_docs_vectordb.parsing.chunker import chunk_page, overlap_ceiling
 from databricks_docs_vectordb.parsing.config import Settings
 from databricks_docs_vectordb.parsing.html_walker import (
     CodeBlock,
@@ -282,6 +282,25 @@ def test_char_count_reflects_the_final_text_including_overlap():
     chunks = chunk_page(nodes, meta(), settings(overlap_size=20))
     assert chunks[1].char_count == len(chunks[1].text)
     assert chunks[1].char_count > len("## Second\n\n" + "x" * 80)
+
+
+# -- overlap_ceiling: what verify.py checks char_count against -------------
+
+
+def test_overlap_ceiling_in_chars_mode_accounts_for_the_join_separator():
+    # A chunk's own content is at most target_chunk_size (or it would be
+    # is_oversized), plus at most overlap_size characters of tail, plus the
+    # "\n\n" chunker.py actually joins them with.
+    s = settings(target_chunk_size=100, overlap_size=20, overlap_mode="chars")
+    assert overlap_ceiling(s) == 100 + 20 + 2
+
+
+def test_overlap_ceiling_in_heading_mode_is_a_generous_approximation():
+    # heading mode's overhead depends on the restated heading_path's own
+    # length, which has no fixed bound -- this is documented as
+    # approximate, not exact, unlike "chars" mode.
+    s = settings(target_chunk_size=100, overlap_mode="heading")
+    assert overlap_ceiling(s) > s.target_chunk_size
 
 
 # -- token_count is left for a later phase -----------------------------
