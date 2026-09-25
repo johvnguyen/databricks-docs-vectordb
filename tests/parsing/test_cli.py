@@ -176,3 +176,67 @@ def test_parse_status_never_writes_to_the_store(env, capsys):
     with ChunkStore(env / "parsed.sqlite") as store:
         after = store.get_chunks(URL_A)
     assert before == after
+
+
+# -- parse verify -----------------------------------------------------------
+
+
+def test_parse_verify_on_a_fully_parsed_corpus_is_ok(env, capsys):
+    seed(env, {URL_A: "Page A", URL_B: "Page B"})
+    main(["parse", "run"])
+    capsys.readouterr()
+
+    assert main(["parse", "verify"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[-1] == "OK"
+
+
+def test_parse_verify_on_a_partial_corpus_is_ok_without_complete(env, capsys):
+    # A deliberate --sample/--limit run leaves most pages unparsed; that
+    # must not look like corruption by default (mirrors `scrape verify`'s
+    # treatment of `pending` rows).
+    seed(env, {URL_A: "Page A", URL_B: "Page B"})
+    main(["parse", "run", "--limit", "1"])
+    capsys.readouterr()
+
+    assert main(["parse", "verify"]) == 0
+    out = capsys.readouterr().out
+    assert "note: 1 ok page(s) have not been parsed yet" in out
+    assert out.splitlines()[-1] == "OK"
+
+
+def test_parse_verify_complete_fails_on_a_partial_corpus(env, capsys):
+    seed(env, {URL_A: "Page A", URL_B: "Page B"})
+    main(["parse", "run", "--limit", "1"])
+    capsys.readouterr()
+
+    assert main(["parse", "verify", "--complete"]) == 1
+    out = capsys.readouterr().out
+    assert "no-chunks" in out
+    assert "FAILED" in out.splitlines()[-1]
+
+
+def test_parse_verify_without_a_manifest_is_a_clear_error(env, capsys):
+    assert main(["parse", "verify"]) == 1
+    assert "scrape enumerate" in capsys.readouterr().err
+
+
+def test_parse_verify_by_section_includes_the_table(env, capsys):
+    seed(env, {URL_A: "Page A", URL_B: "Page B"})
+    main(["parse", "run"])
+    capsys.readouterr()
+
+    main(["parse", "verify", "--by-section"])
+    out = capsys.readouterr().out
+    assert "per-section" in out
+    assert "aws-en/a" in out
+    assert "aws-en/b" in out
+
+
+def test_parse_verify_by_section_omitted_by_default(env, capsys):
+    seed(env, {URL_A: "Page A"})
+    main(["parse", "run"])
+    capsys.readouterr()
+
+    main(["parse", "verify"])
+    assert "per-section" not in capsys.readouterr().out

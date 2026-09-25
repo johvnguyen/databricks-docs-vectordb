@@ -17,6 +17,8 @@ from databricks_docs_vectordb.parsing.report import (
 )
 from databricks_docs_vectordb.parsing.report import overall_stats, section_stats
 from databricks_docs_vectordb.parsing.store import ChunkStore
+from databricks_docs_vectordb.parsing.verify import format_report as format_parse_verify
+from databricks_docs_vectordb.parsing.verify import verify_store
 from databricks_docs_vectordb.scraping.config import SOURCES
 from databricks_docs_vectordb.scraping.config import Settings as ScrapingSettings
 from databricks_docs_vectordb.scraping.enumeration import (
@@ -193,6 +195,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="show chunk counts by source/section, size distribution, and "
         "the oversized-chunk count (no network, no re-parsing)",
     )
+
+    parse_verify = parse_sub.add_parser(
+        "verify",
+        help="check the chunk store against the manifest and itself (no network)",
+        description=(
+            "Check every ok manifest page has chunks, no chunk is empty, no "
+            "chunk exceeds the target size unless flagged oversized, and every "
+            "chunk's prev/next neighbor resolves within its own page. Reports "
+            "every problem; exits 1 if there are any."
+        ),
+    )
+    parse_verify.add_argument(
+        "--by-section",
+        action="store_true",
+        help="also print the per-source/section chunk-size table "
+        "(the same one `parse status` prints)",
+    )
+    parse_verify.add_argument(
+        "--complete",
+        action="store_true",
+        help="parsing should be finished: ok pages with no chunks yet are violations",
+    )
     return parser
 
 
@@ -237,6 +261,8 @@ def main_parse(args: argparse.Namespace) -> int:
             return run_parse_run(settings, args)
         case "status":
             return run_parse_status(settings)
+        case "verify":
+            return run_parse_verify(settings, args)
     return 2
 
 
@@ -500,6 +526,19 @@ def run_parse_status(settings: ParsingSettings) -> int:
         sections = section_stats(summaries, SOURCES)
     print("\n".join(format_parse_sections(sections, overall_stats(summaries))))
     return 0
+
+
+def run_parse_verify(settings: ParsingSettings, args: argparse.Namespace) -> int:
+    require_scraped(settings)
+    with (
+        Manifest(settings.manifest_path) as manifest,
+        ChunkStore(settings.parsed_path) as store,
+    ):
+        report = verify_store(
+            manifest, store, settings, SOURCES, complete=args.complete
+        )
+    print(format_parse_verify(report, settings, by_section=args.by_section))
+    return 0 if report.ok else 1
 
 
 if __name__ == "__main__":
