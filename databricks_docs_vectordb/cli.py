@@ -10,7 +10,17 @@ from pathlib import Path
 
 import httpx
 
-from databricks_docs_vectordb.scraping.config import Settings
+from databricks_docs_vectordb.parsing.config import Settings as ParsingSettings
+from databricks_docs_vectordb.parsing.pipeline import is_current, parse_pages
+from databricks_docs_vectordb.parsing.report import (
+    format_sections as format_parse_sections,
+)
+from databricks_docs_vectordb.parsing.report import overall_stats, section_stats
+from databricks_docs_vectordb.parsing.store import ChunkStore
+from databricks_docs_vectordb.parsing.verify import format_report as format_parse_verify
+from databricks_docs_vectordb.parsing.verify import verify_store
+from databricks_docs_vectordb.scraping.config import SOURCES
+from databricks_docs_vectordb.scraping.config import Settings as ScrapingSettings
 from databricks_docs_vectordb.scraping.enumeration import (
     enumerate_sources,
     format_report,
@@ -142,37 +152,124 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="the crawl should be finished: pages still pending are violations",
     )
+
+    parse = commands.add_parser(
+        "parse", help="turn the raw HTML snapshot into chunked markdown"
+    )
+    parse_sub = parse.add_subparsers(dest="parse_command", required=True)
+
+    run = parse_sub.add_parser(
+        "run",
+        help="parse pending/changed pages into the chunk store",
+        description=(
+            "Parse every ok manifest row whose chunks aren't already current "
+            "(a matching sha256), or every ok row with --refresh. Safe to run "
+            "again: pages already current are skipped, not reparsed."
+        ),
+    )
+    run_size = run.add_mutually_exclusive_group()
+    run_size.add_argument(
+        "--limit",
+        type=positive_int,
+        metavar="N",
+        help="parse at most N pages, then stop (default: all)",
+    )
+    run_size.add_argument(
+        "--sample",
+        type=positive_int,
+        metavar="N",
+        help="parse about N pages spread across every section of every source "
+        "(at least 2 per section, a few more from the largest); the same "
+        "candidate pages always give the same sample. Refuses an N too small "
+        "to cover every section and says how many it needs",
+    )
+    run.add_argument(
+        "--refresh",
+        action="store_true",
+        help="reparse pages even if their chunks already match the current "
+        "sha256 (e.g. after a chunking-rule or target-size change)",
+    )
+
+    parse_sub.add_parser(
+        "status",
+        help="show chunk counts by source/section, size distribution, and "
+        "the oversized-chunk count (no network, no re-parsing)",
+    )
+
+    parse_verify = parse_sub.add_parser(
+        "verify",
+        help="check the chunk store against the manifest and itself (no network)",
+        description=(
+            "Check every ok manifest page has chunks, no chunk is empty, no "
+            "chunk exceeds the target size unless flagged oversized, and every "
+            "chunk's prev/next neighbor resolves within its own page. Reports "
+            "every problem; exits 1 if there are any."
+        ),
+    )
+    parse_verify.add_argument(
+        "--by-section",
+        action="store_true",
+        help="also print the per-source/section chunk-size table "
+        "(the same one `parse status` prints)",
+    )
+    parse_verify.add_argument(
+        "--complete",
+        action="store_true",
+        help="parsing should be finished: ok pages with no chunks yet are violations",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        # Only commands that talk to Databricks need the contact address.
-        settings = Settings.load(
-            require_contact=args.scrape_command in ("enumerate", "fetch"),
-            rate=getattr(args, "rate", None),
-            concurrency=getattr(args, "concurrency", None),
-        )
-        match args.scrape_command:
-            case "enumerate":
-                return run_enumerate(settings)
-            case "fetch":
-                return run_fetch(settings, args)
-            case "status":
-                return run_status(settings)
-            case "verify":
-                return run_verify(settings, args)
+        match args.command:
+            case "scrape":
+                return main_scrape(args)
+            case "parse":
+                return main_parse(args)
     except (RuntimeError, ValueError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 2
 
 
+def main_scrape(args: argparse.Namespace) -> int:
+    # Only commands that talk to Databricks need the contact address.
+    settings = ScrapingSettings.load(
+        require_contact=args.scrape_command in ("enumerate", "fetch"),
+        rate=getattr(args, "rate", None),
+        concurrency=getattr(args, "concurrency", None),
+    )
+    match args.scrape_command:
+        case "enumerate":
+            return run_enumerate(settings)
+        case "fetch":
+            return run_fetch(settings, args)
+        case "status":
+            return run_status(settings)
+        case "verify":
+            return run_verify(settings, args)
+    return 2
+
+
+def main_parse(args: argparse.Namespace) -> int:
+    # Parsing never touches the network, so there's no contact address to load.
+    settings = ParsingSettings.load()
+    match args.parse_command:
+        case "run":
+            return run_parse_run(settings, args)
+        case "status":
+            return run_parse_status(settings)
+        case "verify":
+            return run_parse_verify(settings, args)
+    return 2
+
+
 # -- enumerate -----------------------------------------------------------
 
 
-def run_enumerate(settings: Settings) -> int:
+def run_enumerate(settings: ScrapingSettings) -> int:
     client = httpx.Client(
         headers={"User-Agent": settings.user_agent},
         follow_redirects=True,
@@ -189,14 +286,15 @@ def run_enumerate(settings: Settings) -> int:
 # -- fetch ---------------------------------------------------------------
 
 
-def run_fetch(settings: Settings, args: argparse.Namespace) -> int:
+def run_fetch(settings: ScrapingSettings, args: argparse.Namespace) -> int:
     # Everything that can be checked without a request is checked first.
     require_enumerated(settings)
     robots = RobotsRules(settings.robots_path.read_text())
 
-    with fetch_logging(settings) as log_path, Manifest(
-        settings.manifest_path
-    ) as manifest:
+    with (
+        fetch_logging(settings) as log_path,
+        Manifest(settings.manifest_path) as manifest,
+    ):
         if args.retry_failed:
             requeued = manifest.requeue_failed()
             logging.getLogger(PACKAGE_LOGGER).info(
@@ -216,7 +314,7 @@ def run_fetch(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def choose_sample(
-    settings: Settings, manifest: Manifest, args: argparse.Namespace
+    settings: ScrapingSettings, manifest: Manifest, args: argparse.Namespace
 ) -> list[Page]:
     """The pages `--sample N` will fetch, drawn from what would be fetched anyway."""
     candidates = manifest.next_batch(refresh=args.refresh)
@@ -232,7 +330,7 @@ def choose_sample(
 
 
 async def crawl(
-    settings: Settings,
+    settings: ScrapingSettings,
     manifest: Manifest,
     robots: RobotsRules,
     args: argparse.Namespace,
@@ -265,7 +363,7 @@ def follow_up(summary: RunSummary, failed: int) -> list[str]:
     return lines
 
 
-def require_enumerated(settings: Settings) -> None:
+def require_enumerated(settings: ScrapingSettings) -> None:
     if not settings.manifest_path.exists() or not settings.robots_path.exists():
         raise CliError(
             f"nothing to fetch yet ({settings.manifest_path} or {settings.robots_path} "
@@ -274,7 +372,7 @@ def require_enumerated(settings: Settings) -> None:
 
 
 @contextmanager
-def fetch_logging(settings: Settings) -> Iterator[Path]:
+def fetch_logging(settings: ScrapingSettings) -> Iterator[Path]:
     """Log to the console and to `data/logs/fetch-<date>.log`.
 
     The handlers hang off this package's logger only, so httpx's own
@@ -312,7 +410,7 @@ def fetch_logging(settings: Settings) -> Iterator[Path]:
 STATUS_DETAIL_LIMIT = 10
 
 
-def run_status(settings: Settings) -> int:
+def run_status(settings: ScrapingSettings) -> int:
     if not settings.manifest_path.exists():
         raise CliError(
             f"no manifest at {settings.manifest_path}; run `{PROG} scrape enumerate` first"
@@ -337,7 +435,7 @@ def run_status(settings: Settings) -> int:
 # -- verify --------------------------------------------------------------
 
 
-def run_verify(settings: Settings, args: argparse.Namespace) -> int:
+def run_verify(settings: ScrapingSettings, args: argparse.Namespace) -> int:
     if not settings.manifest_path.exists():
         raise CliError(
             f"no manifest at {settings.manifest_path}; run `{PROG} scrape enumerate` first"
@@ -345,6 +443,101 @@ def run_verify(settings: Settings, args: argparse.Namespace) -> int:
     with Manifest(settings.manifest_path) as manifest:
         report = verify_snapshot(settings, manifest, complete=args.complete)
     print(format_verify(report, settings, by_section=args.by_section))
+    return 0 if report.ok else 1
+
+
+# -- parse -----------------------------------------------------------------
+
+
+def require_scraped(settings: ParsingSettings) -> None:
+    if not settings.manifest_path.exists():
+        raise CliError(
+            f"no manifest at {settings.manifest_path}; run `{PROG} scrape enumerate` "
+            f"(and `{PROG} scrape fetch`) first"
+        )
+
+
+def run_parse_run(settings: ParsingSettings, args: argparse.Namespace) -> int:
+    require_scraped(settings)
+    with (
+        Manifest(settings.manifest_path) as manifest,
+        ChunkStore(settings.parsed_path) as store,
+    ):
+        ok_pages = manifest.pages_with_status("ok")
+        candidates = (
+            ok_pages
+            if args.refresh
+            else [p for p in ok_pages if not is_current(p, store)]
+        )
+        already_current = len(ok_pages) - len(candidates)
+
+        if args.sample:
+            sample = sample_pages(candidates, SOURCES, args.sample)
+            pages = sample.pages
+            logging.getLogger(PACKAGE_LOGGER).info(
+                "sample: %d of %d candidate pages, from %d sections "
+                "(%d needed for 2 per section)",
+                len(pages),
+                sample.candidates,
+                sample.sections,
+                sample.minimum,
+            )
+        else:
+            pages = candidates
+        if args.limit:
+            pages = pages[: args.limit]
+
+        results = list(
+            parse_pages(
+                pages,
+                raw_dir=settings.raw_dir,
+                store=store,
+                settings=settings,
+                force=args.refresh,
+            )
+        )
+
+    parsed = sum(1 for r in results if r.outcome == "parsed")
+    skipped = sum(1 for r in results if r.outcome == "skipped")
+    chunks_written = sum(r.chunk_count for r in results if r.outcome == "parsed")
+    print(
+        f"{len(results)} page(s) considered ({already_current} already current): "
+        f"{parsed} parsed, {skipped} skipped"
+    )
+    print(f"{chunks_written} chunk(s) (re)written")
+    return 0
+
+
+def run_parse_status(settings: ParsingSettings) -> int:
+    if not settings.parsed_path.exists():
+        print(f"no chunk store yet at {settings.parsed_path}; run `{PROG} parse run`")
+        return 0
+    with ChunkStore(settings.parsed_path) as store:
+        counts = store.counts()
+        if counts.chunks == 0:
+            print(f"the chunk store is empty; run `{PROG} parse run`")
+            return 0
+        print(f"chunk store: {settings.parsed_path}")
+        print(
+            f"{counts.pages} page(s), {counts.chunks} chunk(s), "
+            f"{counts.oversized} oversized"
+        )
+        summaries = store.all_summaries()
+        sections = section_stats(summaries, SOURCES)
+    print("\n".join(format_parse_sections(sections, overall_stats(summaries))))
+    return 0
+
+
+def run_parse_verify(settings: ParsingSettings, args: argparse.Namespace) -> int:
+    require_scraped(settings)
+    with (
+        Manifest(settings.manifest_path) as manifest,
+        ChunkStore(settings.parsed_path) as store,
+    ):
+        report = verify_store(
+            manifest, store, settings, SOURCES, complete=args.complete
+        )
+    print(format_parse_verify(report, settings, by_section=args.by_section))
     return 0 if report.ok else 1
 
 
