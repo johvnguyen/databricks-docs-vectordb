@@ -86,6 +86,28 @@ def test_an_article_with_no_markdown_div_is_rejected():
         walk("<html><body><article><p>wrong shape</p></article></body></html>")
 
 
+# -- api/ pages: the "View as Markdown" toolbar is not content ------------
+
+
+def test_the_view_as_markdown_toolbar_is_stripped():
+    html = (
+        "<html><body><article>"
+        '<div class="theme-doc-markdown markdown">'
+        "<header><h1>Title</h1></header>"
+        '<div class="apiMdActions">'
+        '<a href="/api/x.md">View as Markdown</a>'
+        '<button class="apiMdCopy">Copy as Markdown</button>'
+        "</div>"
+        '<h2 id="s">Section</h2><p>Real content.</p>'
+        "</div></article></body></html>"
+    )
+    nodes = walk(html)
+    assert nodes == [
+        Heading(level=2, id="s", text="Section"),
+        Paragraph("Real content."),
+    ]
+
+
 # -- delta/index.html: plain prose + headings + links -----------------------
 
 

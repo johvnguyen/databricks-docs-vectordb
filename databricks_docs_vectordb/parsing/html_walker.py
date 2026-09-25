@@ -123,7 +123,11 @@ def walk(html: str) -> list[Node]:
 # -- block-level dispatch --------------------------------------------------
 
 _SKIP_TAGS = frozenset({"nav", "header", "script", "style"})
-_SKIP_CLASS_MARKERS = ("theme-doc-toc-mobile", "theme-doc-footer-edit-meta-row")
+_SKIP_CLASS_MARKERS = (
+    "theme-doc-toc-mobile",
+    "theme-doc-footer-edit-meta-row",
+    "apiMdActions",
+)
 _HEADING_TAGS = frozenset({"h2", "h3", "h4", "h5", "h6"})
 
 
