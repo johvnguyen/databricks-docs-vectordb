@@ -35,8 +35,26 @@ class PageResult:
     chunk_count: int
 
 
+def is_current(page: Page, store: ChunkStore) -> bool:
+    """Whether the store's chunks for `page.url` already reflect its `sha256`.
+
+    Used to decide, ahead of time, which manifest rows actually need
+    (re)parsing -- e.g. to build a `--sample`/`--limit` candidate list
+    before a run. `parse_page` repeats this same check inline rather than
+    calling here, so the common "needs parsing" path only queries the
+    store once.
+    """
+    existing = store.get_chunks(page.url)
+    return bool(existing) and all(c.page_sha256 == page.sha256 for c in existing)
+
+
 def parse_page(
-    page: Page, *, raw_dir: Path, store: ChunkStore, settings: Settings
+    page: Page,
+    *,
+    raw_dir: Path,
+    store: ChunkStore,
+    settings: Settings,
+    force: bool = False,
 ) -> PageResult:
     """Parse and store one manifest row's chunks, unless already current.
 
@@ -46,9 +64,13 @@ def parse_page(
     produced any chunks (an edge case: no extractable content at all) is
     always reparsed, since an empty result is indistinguishable from
     "never parsed"; this is cheap because there's nothing to chunk.
+
+    `force=True` (`--refresh` at the CLI) reparses regardless, e.g. after a
+    chunking-rule or target-size change that doesn't show up as a sha256
+    change.
     """
     existing = store.get_chunks(page.url)
-    if existing and all(c.page_sha256 == page.sha256 for c in existing):
+    if not force and existing and all(c.page_sha256 == page.sha256 for c in existing):
         return PageResult(page.url, "skipped", len(existing))
 
     html = (raw_dir / page.rel_path).read_text(encoding="utf-8")
@@ -66,8 +88,15 @@ def parse_page(
 
 
 def parse_pages(
-    pages: Iterable[Page], *, raw_dir: Path, store: ChunkStore, settings: Settings
+    pages: Iterable[Page],
+    *,
+    raw_dir: Path,
+    store: ChunkStore,
+    settings: Settings,
+    force: bool = False,
 ) -> Iterator[PageResult]:
     """Parse each page in turn, yielding one result as each one completes."""
     for page in pages:
-        yield parse_page(page, raw_dir=raw_dir, store=store, settings=settings)
+        yield parse_page(
+            page, raw_dir=raw_dir, store=store, settings=settings, force=force
+        )

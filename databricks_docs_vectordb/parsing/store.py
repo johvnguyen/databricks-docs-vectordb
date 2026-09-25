@@ -72,6 +72,13 @@ class ChunkCounts(NamedTuple):
     oversized: int  # chunks flagged is_oversized
 
 
+class ChunkSummary(NamedTuple):
+    url: str
+    source: str
+    char_count: int
+    is_oversized: bool
+
+
 class ChunkStore:
     """SQLite record of every chunk this phase has produced from Phase 1's
     snapshot.
@@ -217,6 +224,24 @@ class ChunkStore:
             row["source"]: ChunkCounts(row["pages"], row["chunks"], row["oversized"])
             for row in rows
         }
+
+    def all_summaries(self) -> list[ChunkSummary]:
+        """`(url, source, char_count, is_oversized)` for every chunk.
+
+        For reporting (`parse status`'s per-source/section breakdown and
+        chunk-size distribution) -- deliberately not `Chunk`'s full row,
+        since a report only needs these four fields, and there can be tens
+        of thousands of chunks in the full corpus.
+        """
+        rows = self._conn.execute(
+            "SELECT url, source, char_count, is_oversized FROM chunks"
+        )
+        return [
+            ChunkSummary(
+                row["url"], row["source"], row["char_count"], bool(row["is_oversized"])
+            )
+            for row in rows
+        ]
 
 
 def _row_to_chunk(row: sqlite3.Row) -> Chunk:

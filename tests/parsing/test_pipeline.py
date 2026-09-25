@@ -5,6 +5,7 @@ import pytest
 from databricks_docs_vectordb.parsing.config import Settings
 from databricks_docs_vectordb.parsing.pipeline import (
     PageResult,
+    is_current,
     parse_page,
     parse_pages,
 )
@@ -228,3 +229,59 @@ def test_a_missing_raw_file_raises_rather_than_being_silently_skipped(
 ):
     with pytest.raises(FileNotFoundError):
         parse_page(page(), raw_dir=raw_dir, store=store, settings=settings)
+
+
+# -- is_current: the same predicate the CLI uses to pick candidates ---------
+
+
+def test_is_current_is_false_for_a_never_parsed_page(store):
+    assert is_current(page(), store) is False
+
+
+def test_is_current_is_true_once_parsed_with_a_matching_sha256(
+    raw_dir, store, settings
+):
+    write_page(raw_dir, "aws/en/example/index.html", make_html())
+    p = page(sha256="a" * 64)
+    parse_page(p, raw_dir=raw_dir, store=store, settings=settings)
+    assert is_current(p, store) is True
+
+
+def test_is_current_is_false_once_the_sha256_changes(raw_dir, store, settings):
+    write_page(raw_dir, "aws/en/example/index.html", make_html())
+    parse_page(page(sha256="a" * 64), raw_dir=raw_dir, store=store, settings=settings)
+    assert is_current(page(sha256="b" * 64), store) is False
+
+
+# -- force=True (--refresh): reparse regardless of currency -----------------
+
+
+def test_force_reparses_an_already_current_page(raw_dir, store, settings):
+    write_page(raw_dir, "aws/en/example/index.html", make_html("Original"))
+    p = page(sha256="a" * 64)
+    parse_page(p, raw_dir=raw_dir, store=store, settings=settings)
+
+    write_page(raw_dir, "aws/en/example/index.html", make_html("Original"))  # unchanged
+    result = parse_page(p, raw_dir=raw_dir, store=store, settings=settings, force=True)
+    assert result.outcome == "parsed"
+
+
+def test_without_force_an_unchanged_page_is_still_skipped(raw_dir, store, settings):
+    write_page(raw_dir, "aws/en/example/index.html", make_html())
+    p = page(sha256="a" * 64)
+    parse_page(p, raw_dir=raw_dir, store=store, settings=settings)
+    result = parse_page(p, raw_dir=raw_dir, store=store, settings=settings, force=False)
+    assert result.outcome == "skipped"
+
+
+def test_parse_pages_force_applies_to_every_page_in_the_batch(raw_dir, store, settings):
+    write_page(raw_dir, "a/index.html", make_html("Page A"))
+    p = page(
+        "a/index.html", url="https://docs.databricks.com/aws/en/a/", sha256="a" * 64
+    )
+    parse_page(p, raw_dir=raw_dir, store=store, settings=settings)
+
+    results = list(
+        parse_pages([p], raw_dir=raw_dir, store=store, settings=settings, force=True)
+    )
+    assert results[0].outcome == "parsed"

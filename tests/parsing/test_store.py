@@ -8,6 +8,7 @@ from databricks_docs_vectordb.parsing.store import (
     Chunk,
     ChunkCounts,
     ChunkStore,
+    ChunkSummary,
 )
 
 URL_A = "https://docs.databricks.com/aws/en/delta/"
@@ -253,3 +254,38 @@ def test_oversized_chunks_are_counted(store):
     )
     store.replace_page_chunks(URL_A, chunks, now=T1)
     assert store.counts() == ChunkCounts(pages=1, chunks=2, oversized=1)
+
+
+# -- all_summaries -----------------------------------------------------
+
+
+def test_all_summaries_is_empty_for_an_empty_store(store):
+    assert store.all_summaries() == []
+
+
+def test_all_summaries_covers_every_chunk_across_pages(store):
+    chunks_a = make_page(URL_A, 2, source="aws-en")
+    chunks_b = make_page(URL_B, 1, source="api")
+    store.replace_page_chunks(URL_A, chunks_a, now=T1)
+    store.replace_page_chunks(URL_B, chunks_b, now=T1)
+
+    summaries = store.all_summaries()
+    assert len(summaries) == 3
+    assert set(summaries) == {
+        ChunkSummary(c.url, c.source, c.char_count, c.is_oversized)
+        for c in (*chunks_a, *chunks_b)
+    }
+
+
+def test_all_summaries_reflects_is_oversized_as_a_real_bool(store):
+    chunk = make_chunk(URL_A, 0, is_oversized=True)
+    store.replace_page_chunks(URL_A, [chunk], now=T1)
+    summary = store.all_summaries()[0]
+    assert summary.is_oversized is True
+    assert isinstance(summary.is_oversized, bool)
+
+
+def test_all_summaries_after_a_replace_reflects_only_the_current_chunks(store):
+    store.replace_page_chunks(URL_A, make_page(URL_A, 3), now=T1)
+    store.replace_page_chunks(URL_A, make_page(URL_A, 1), now=T2)
+    assert len(store.all_summaries()) == 1
