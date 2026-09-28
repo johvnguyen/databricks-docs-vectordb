@@ -11,7 +11,7 @@
   // which breaks hardlinking and spams warnings. Copy mode avoids that.
   "containerEnv": { "UV_LINK_MODE": "copy" },
 
-  "postCreateCommand": "pipx install uv && npm install -g @anthropic-ai/claude-code",
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y sqlite3 && pipx install uv && npm install -g @anthropic-ai/claude-code",
 
   "customizations": {
     "vscode": {
