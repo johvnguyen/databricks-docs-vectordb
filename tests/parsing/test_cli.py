@@ -73,6 +73,31 @@ def test_parse_run_parses_every_ok_page(env, capsys):
         assert store.counts().pages == 2
 
 
+def test_parse_run_also_backfills_token_counts_with_no_separate_step(env, capsys):
+    # Step 3's design.md decision: `parse run` alone leaves parsed.sqlite
+    # ready for Phase 3, no separate `embed backfill-tokens` invocation
+    # required.
+    seed(env, {URL_A: "Page A"})
+    assert main(["parse", "run"]) == 0
+    out = capsys.readouterr().out
+    assert "given a real token_count (model: text-embedding-3-small)" in out
+
+    with ChunkStore(env / "parsed.sqlite") as store:
+        assert store.chunks_missing_token_count() == []
+        for chunk in store.get_chunks(URL_A):
+            assert chunk.token_count is not None and chunk.token_count > 0
+
+
+def test_a_second_parse_run_backfills_nothing_new(env, capsys):
+    seed(env, {URL_A: "Page A"})
+    main(["parse", "run"])
+    capsys.readouterr()
+
+    assert main(["parse", "run"]) == 0
+    out = capsys.readouterr().out
+    assert "0 given a real token_count" in out
+
+
 def test_running_parse_run_twice_skips_the_second_time(env, capsys):
     seed(env, {URL_A: "Page A"})
     main(["parse", "run"])

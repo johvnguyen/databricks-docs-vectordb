@@ -166,7 +166,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Parse every ok manifest row whose chunks aren't already current "
             "(a matching sha256), or every ok row with --refresh. Safe to run "
-            "again: pages already current are skipped, not reparsed."
+            "again: pages already current are skipped, not reparsed. Also "
+            "backfills token_count for any chunk that doesn't have one yet, "
+            "using the configured embedding model's tokenizer."
         ),
     )
     run_size = run.add_mutually_exclusive_group()
@@ -234,7 +236,10 @@ def build_parser() -> argparse.ArgumentParser:
             "one yet, using the currently configured model's tiktoken "
             "encoding. A metadata fill-in only: parsed.sqlite's text and "
             "chunk boundaries are untouched. Safe to run again -- chunks "
-            "that already have a token_count are left alone."
+            "that already have a token_count are left alone. `parse run` "
+            "already does this automatically, so this is a manual escape "
+            "hatch (e.g. after editing parsed.sqlite by hand), not a step "
+            "the normal workflow needs."
         ),
     )
     return parser
@@ -280,7 +285,12 @@ def main_parse(args: argparse.Namespace) -> int:
     settings = ParsingSettings.load()
     match args.parse_command:
         case "run":
-            return run_parse_run(settings, args)
+            # `run` also backfills token_count (Step 3), which needs the
+            # configured embedding model's tokenizer -- parsing itself
+            # still knows nothing about embedding, but loading this here
+            # means `parse run` alone leaves parsed.sqlite with real token
+            # counts, with no separate `embed backfill-tokens` step needed.
+            return run_parse_run(settings, EmbeddingSettings.load(), args)
         case "status":
             return run_parse_status(settings)
         case "verify":
@@ -488,7 +498,11 @@ def require_scraped(settings: ParsingSettings) -> None:
         )
 
 
-def run_parse_run(settings: ParsingSettings, args: argparse.Namespace) -> int:
+def run_parse_run(
+    settings: ParsingSettings,
+    embedding_settings: EmbeddingSettings,
+    args: argparse.Namespace,
+) -> int:
     require_scraped(settings)
     with (
         Manifest(settings.manifest_path) as manifest,
@@ -527,6 +541,12 @@ def run_parse_run(settings: ParsingSettings, args: argparse.Namespace) -> int:
                 force=args.refresh,
             )
         )
+        # Every (re)written chunk starts with token_count = NULL (chunker.py
+        # never sets it); fill it in here so a `parse run` alone leaves
+        # parsed.sqlite ready for Phase 3, no separate `embed
+        # backfill-tokens` step required (see cli.py's embed group, kept
+        # around as a manual escape hatch, not a routine step).
+        tokenized = backfill_token_counts(store, embedding_settings.model)
 
     parsed = sum(1 for r in results if r.outcome == "parsed")
     skipped = sum(1 for r in results if r.outcome == "skipped")
@@ -535,7 +555,10 @@ def run_parse_run(settings: ParsingSettings, args: argparse.Namespace) -> int:
         f"{len(results)} page(s) considered ({already_current} already current): "
         f"{parsed} parsed, {skipped} skipped"
     )
-    print(f"{chunks_written} chunk(s) (re)written")
+    print(
+        f"{chunks_written} chunk(s) (re)written, {tokenized} given a real "
+        f"token_count (model: {embedding_settings.model})"
+    )
     return 0
 
 
