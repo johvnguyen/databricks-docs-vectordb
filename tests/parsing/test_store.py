@@ -1,4 +1,5 @@
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from databricks_docs_vectordb.parsing.store import (
     ChunkCounts,
     ChunkStore,
     ChunkSummary,
+    ChunkText,
 )
 
 URL_A = "https://docs.databricks.com/aws/en/delta/"
@@ -289,3 +291,55 @@ def test_all_summaries_after_a_replace_reflects_only_the_current_chunks(store):
     store.replace_page_chunks(URL_A, make_page(URL_A, 3), now=T1)
     store.replace_page_chunks(URL_A, make_page(URL_A, 1), now=T2)
     assert len(store.all_summaries()) == 1
+
+
+# -- chunks_missing_token_count / set_token_counts --------------------------
+
+
+def test_chunks_missing_token_count_is_empty_for_an_empty_store(store):
+    assert store.chunks_missing_token_count() == []
+
+
+def test_chunks_missing_token_count_lists_every_null_row(store):
+    store.replace_page_chunks(URL_A, make_page(URL_A, 2), now=T1)
+    missing = store.chunks_missing_token_count()
+    assert sorted(missing) == sorted(
+        ChunkText(c.chunk_id, c.text) for c in store.get_chunks(URL_A)
+    )
+
+
+def test_chunks_missing_token_count_excludes_rows_that_already_have_one(store):
+    chunks = make_page(URL_A, 2)
+    chunks[0] = replace(chunks[0], token_count=5)
+    store.replace_page_chunks(URL_A, chunks, now=T1)
+    missing = store.chunks_missing_token_count()
+    assert [m.chunk_id for m in missing] == [chunks[1].chunk_id]
+
+
+def test_set_token_counts_writes_the_given_values(store):
+    store.replace_page_chunks(URL_A, make_page(URL_A, 2), now=T1)
+    ids = [c.chunk_id for c in store.get_chunks(URL_A)]
+    updated = store.set_token_counts({ids[0]: 7, ids[1]: 42})
+    assert updated == 2
+    chunks = {c.chunk_id: c for c in store.get_chunks(URL_A)}
+    assert chunks[ids[0]].token_count == 7
+    assert chunks[ids[1]].token_count == 42
+
+
+def test_set_token_counts_clears_the_missing_list(store):
+    store.replace_page_chunks(URL_A, make_page(URL_A, 2), now=T1)
+    ids = [c.chunk_id for c in store.get_chunks(URL_A)]
+    store.set_token_counts({i: 1 for i in ids})
+    assert store.chunks_missing_token_count() == []
+
+
+def test_set_token_counts_skips_chunk_ids_no_longer_in_the_store(store):
+    store.replace_page_chunks(URL_A, make_page(URL_A, 1), now=T1)
+    updated = store.set_token_counts({"does-not-exist": 1})
+    assert updated == 0
+
+
+def test_set_token_counts_with_an_empty_mapping_does_nothing(store):
+    store.replace_page_chunks(URL_A, make_page(URL_A, 1), now=T1)
+    assert store.set_token_counts({}) == 0
+    assert len(store.chunks_missing_token_count()) == 1

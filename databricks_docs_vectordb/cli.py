@@ -10,6 +10,8 @@ from pathlib import Path
 
 import httpx
 
+from databricks_docs_vectordb.embedding.config import Settings as EmbeddingSettings
+from databricks_docs_vectordb.embedding.tokens import backfill_token_counts
 from databricks_docs_vectordb.parsing.config import Settings as ParsingSettings
 from databricks_docs_vectordb.parsing.pipeline import is_current, parse_pages
 from databricks_docs_vectordb.parsing.report import (
@@ -217,6 +219,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="parsing should be finished: ok pages with no chunks yet are violations",
     )
+
+    embed = commands.add_parser(
+        "embed", help="turn parsed chunks into embedding vectors"
+    )
+    embed_sub = embed.add_subparsers(dest="embed_command", required=True)
+
+    embed_sub.add_parser(
+        "backfill-tokens",
+        help="fill in parsed.sqlite's token_count using the configured "
+        "model's real tokenizer (no network, no re-chunking)",
+        description=(
+            "Compute a real token_count for every chunk that doesn't have "
+            "one yet, using the currently configured model's tiktoken "
+            "encoding. A metadata fill-in only: parsed.sqlite's text and "
+            "chunk boundaries are untouched. Safe to run again -- chunks "
+            "that already have a token_count are left alone."
+        ),
+    )
     return parser
 
 
@@ -228,6 +248,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return main_scrape(args)
             case "parse":
                 return main_parse(args)
+            case "embed":
+                return main_embed(args)
     except (RuntimeError, ValueError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -263,6 +285,15 @@ def main_parse(args: argparse.Namespace) -> int:
             return run_parse_status(settings)
         case "verify":
             return run_parse_verify(settings, args)
+    return 2
+
+
+def main_embed(args: argparse.Namespace) -> int:
+    # backfill-tokens never calls a provider, so no API key is needed here.
+    settings = EmbeddingSettings.load()
+    match args.embed_command:
+        case "backfill-tokens":
+            return run_embed_backfill_tokens(settings)
     return 2
 
 
@@ -539,6 +570,27 @@ def run_parse_verify(settings: ParsingSettings, args: argparse.Namespace) -> int
         )
     print(format_parse_verify(report, settings, by_section=args.by_section))
     return 0 if report.ok else 1
+
+
+# -- embed -------------------------------------------------------------------
+
+
+def require_parsed(settings: EmbeddingSettings) -> None:
+    if not settings.parsed_path.exists():
+        raise CliError(
+            f"no chunk store at {settings.parsed_path}; run `{PROG} parse run` first"
+        )
+
+
+def run_embed_backfill_tokens(settings: EmbeddingSettings) -> int:
+    require_parsed(settings)
+    with ChunkStore(settings.parsed_path) as store:
+        updated = backfill_token_counts(store, settings.model)
+    if updated:
+        print(f"{updated} chunk(s) given a real token_count (model: {settings.model})")
+    else:
+        print("nothing to backfill; every chunk already has a token_count")
+    return 0
 
 
 if __name__ == "__main__":

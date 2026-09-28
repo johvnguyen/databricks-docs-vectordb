@@ -1,5 +1,5 @@
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,6 +77,11 @@ class ChunkSummary(NamedTuple):
     source: str
     char_count: int
     is_oversized: bool
+
+
+class ChunkText(NamedTuple):
+    chunk_id: str
+    text: str
 
 
 class ChunkStore:
@@ -196,6 +201,27 @@ class ChunkStore:
                 ],
             )
 
+    def set_token_counts(self, counts: Mapping[str, int]) -> int:
+        """Write a real `token_count` for each `chunk_id` in `counts`.
+
+        For Phase 3's tiktoken backfill (`embedding/tokens.py`) -- Phase 2
+        never picks a tokenizer (`parsing.md`'s Resolved question 6), so
+        this is the one write path into that column, separate from
+        `replace_page_chunks`'s full-chunk replace. One transaction, one
+        `UPDATE` per row. A `chunk_id` not currently in the store (e.g. a
+        concurrent `parse run` replaced its page between reading and
+        writing) is silently skipped, not an error. Returns how many rows
+        were actually updated, which may be fewer than `len(counts)`.
+        """
+        if not counts:
+            return 0
+        with self._conn:
+            cur = self._conn.executemany(
+                "UPDATE chunks SET token_count = ? WHERE chunk_id = ?",
+                [(count, chunk_id) for chunk_id, count in counts.items()],
+            )
+        return cur.rowcount
+
     # -- reads ---------------------------------------------------------------
 
     def get_chunks(self, url: str) -> list[Chunk]:
@@ -242,6 +268,19 @@ class ChunkStore:
             )
             for row in rows
         ]
+
+    def chunks_missing_token_count(self) -> list[ChunkText]:
+        """`(chunk_id, text)` for every chunk with no real `token_count` yet.
+
+        For Phase 3's tiktoken backfill (`embedding/tokens.py`) --
+        deliberately just these two fields, not the full `Chunk` row, since
+        there can be tens of thousands of chunks in the full corpus and
+        nothing else is needed to compute a count.
+        """
+        rows = self._conn.execute(
+            "SELECT chunk_id, text FROM chunks WHERE token_count IS NULL"
+        )
+        return [ChunkText(row["chunk_id"], row["text"]) for row in rows]
 
 
 def _row_to_chunk(row: sqlite3.Row) -> Chunk:

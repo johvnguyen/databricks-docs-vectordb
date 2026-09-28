@@ -1,9 +1,49 @@
+from pathlib import Path
+
+import pytest
 import tiktoken
 
-from databricks_docs_vectordb.embedding.tokens import count_tokens, get_encoding
+from databricks_docs_vectordb.embedding.tokens import (
+    backfill_token_counts,
+    count_tokens,
+    get_encoding,
+)
+from databricks_docs_vectordb.parsing.store import Chunk, ChunkStore
 
 OPENAI_SMALL = "text-embedding-3-small"
 OPENAI_LARGE = "text-embedding-3-large"
+URL_A = "https://docs.databricks.com/aws/en/delta/"
+
+
+@pytest.fixture
+def store(tmp_path: Path):
+    with ChunkStore(tmp_path / "parsed.sqlite") as s:
+        yield s
+
+
+def make_chunk(index: int, **overrides) -> Chunk:
+    defaults = {
+        "chunk_id": f"{URL_A}#{index}",
+        "url": URL_A,
+        "source": "aws-en",
+        "cloud": "aws",
+        "chunk_index": index,
+        "prev_chunk_id": None,
+        "next_chunk_id": None,
+        "heading_path": "Delta Lake",
+        "section_path": "Tables > Table formats > Delta Lake",
+        "doc_title": "What is Delta Lake?",
+        "description": "Delta Lake is the optimized storage layer.",
+        "text": "hello world",
+        "char_count": len("hello world"),
+        "token_count": None,
+        "is_oversized": False,
+        "last_updated": "2026-09-11",
+        "page_sha256": "ab" * 32,
+        "fetched_at": "2026-09-11T00:00:00Z",
+    }
+    defaults.update(overrides)
+    return Chunk(**defaults)
 
 
 def test_count_tokens_matches_known_tiktoken_counts():
@@ -38,3 +78,47 @@ def test_count_tokens_agrees_with_encoding_the_text_directly():
     text = "The quick brown fox jumps over the lazy dog."
     encoding = tiktoken.encoding_for_model(OPENAI_SMALL)
     assert count_tokens(text, OPENAI_SMALL) == len(encoding.encode(text))
+
+
+# -- backfill_token_counts ---------------------------------------------------
+
+
+def test_backfill_writes_real_counts_for_every_null_row(store):
+    chunk = make_chunk(0, text="hello world")
+    store.replace_page_chunks(URL_A, [chunk])
+    updated = backfill_token_counts(store, OPENAI_SMALL)
+    assert updated == 1
+    assert store.get_chunks(URL_A)[0].token_count == 2
+
+
+def test_backfill_on_an_empty_store_does_nothing(store):
+    assert backfill_token_counts(store, OPENAI_SMALL) == 0
+
+
+def test_backfill_leaves_rows_that_already_have_a_count_alone(store):
+    chunk = make_chunk(0, text="hello world", token_count=999)
+    store.replace_page_chunks(URL_A, [chunk])
+    updated = backfill_token_counts(store, OPENAI_SMALL)
+    assert updated == 0
+    assert store.get_chunks(URL_A)[0].token_count == 999
+
+
+def test_a_second_backfill_run_touches_nothing(store):
+    chunk = make_chunk(0, text="hello world")
+    store.replace_page_chunks(URL_A, [chunk])
+    assert backfill_token_counts(store, OPENAI_SMALL) == 1
+    assert backfill_token_counts(store, OPENAI_SMALL) == 0
+
+
+def test_backfill_only_touches_the_pages_a_reparse_actually_changed(store):
+    a = make_chunk(0, text="hello world")
+    b = make_chunk(0, chunk_id=f"{URL_A}other#0", url=f"{URL_A}other", text="a b c")
+    store.replace_page_chunks(URL_A, [a])
+    store.replace_page_chunks(f"{URL_A}other", [b])
+    assert backfill_token_counts(store, OPENAI_SMALL) == 2
+
+    # Re-parsing just one page resets its token_count to NULL again
+    # (chunker.py still doesn't set it); the other page's is untouched.
+    store.replace_page_chunks(URL_A, [make_chunk(0, text="hello world, again")])
+    assert [c.chunk_id for c in store.chunks_missing_token_count()] == [a.chunk_id]
+    assert backfill_token_counts(store, OPENAI_SMALL) == 1
