@@ -79,6 +79,7 @@ def chunk_page(
             text=text,
             char_count=len(text),
             token_count=None,
+            token_count_model=None,
             is_oversized=plan.is_oversized,
             last_updated=metadata.last_updated,
             page_sha256=metadata.page_sha256,

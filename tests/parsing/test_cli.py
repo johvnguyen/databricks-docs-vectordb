@@ -83,7 +83,7 @@ def test_parse_run_also_backfills_token_counts_with_no_separate_step(env, capsys
     assert "given a real token_count (model: text-embedding-3-small)" in out
 
     with ChunkStore(env / "parsed.sqlite") as store:
-        assert store.chunks_missing_token_count() == []
+        assert store.chunks_needing_token_count("text-embedding-3-small") == []
         for chunk in store.get_chunks(URL_A):
             assert chunk.token_count is not None and chunk.token_count > 0
 

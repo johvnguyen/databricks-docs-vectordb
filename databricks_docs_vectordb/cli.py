@@ -227,20 +227,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     embed_sub = embed.add_subparsers(dest="embed_command", required=True)
 
-    embed_sub.add_parser(
+    backfill_tokens = embed_sub.add_parser(
         "backfill-tokens",
         help="fill in parsed.sqlite's token_count using the configured "
-        "model's real tokenizer (no network, no re-chunking)",
+        "(or --model) tokenizer (no network, no re-chunking)",
         description=(
-            "Compute a real token_count for every chunk that doesn't have "
-            "one yet, using the currently configured model's tiktoken "
-            "encoding. A metadata fill-in only: parsed.sqlite's text and "
-            "chunk boundaries are untouched. Safe to run again -- chunks "
-            "that already have a token_count are left alone. `parse run` "
-            "already does this automatically, so this is a manual escape "
-            "hatch (e.g. after editing parsed.sqlite by hand), not a step "
-            "the normal workflow needs."
+            "Compute a real token_count for every chunk not already tagged "
+            "as tokenized by the target model's tiktoken encoding. A "
+            "metadata fill-in only: parsed.sqlite's text and chunk "
+            "boundaries are untouched. Safe to run again -- a chunk already "
+            "tagged with the target model is left alone; `parse run` "
+            "already does this for the configured model automatically, so "
+            "with no --model this is just a manual escape hatch (e.g. after "
+            "editing parsed.sqlite by hand). Pass --model to try a "
+            "different tokenizer without touching your configured model: "
+            "every chunk is re-tokenized under it and tagged accordingly, "
+            "so switching back re-tokenizes again rather than reusing a "
+            "stale count."
         ),
+    )
+    backfill_tokens.add_argument(
+        "--model",
+        metavar="MODEL",
+        help="tokenize as this model instead of the configured one (e.g. "
+        "to compare tokenizers); doesn't change your configured model",
     )
     return parser
 
@@ -303,7 +313,7 @@ def main_embed(args: argparse.Namespace) -> int:
     settings = EmbeddingSettings.load()
     match args.embed_command:
         case "backfill-tokens":
-            return run_embed_backfill_tokens(settings)
+            return run_embed_backfill_tokens(settings, args)
     return 2
 
 
@@ -605,14 +615,17 @@ def require_parsed(settings: EmbeddingSettings) -> None:
         )
 
 
-def run_embed_backfill_tokens(settings: EmbeddingSettings) -> int:
+def run_embed_backfill_tokens(
+    settings: EmbeddingSettings, args: argparse.Namespace
+) -> int:
     require_parsed(settings)
+    model = args.model or settings.model
     with ChunkStore(settings.parsed_path) as store:
-        updated = backfill_token_counts(store, settings.model)
+        updated = backfill_token_counts(store, model)
     if updated:
-        print(f"{updated} chunk(s) given a real token_count (model: {settings.model})")
+        print(f"{updated} chunk(s) given a real token_count (model: {model})")
     else:
-        print("nothing to backfill; every chunk already has a token_count")
+        print(f"nothing to backfill; every chunk is already tagged with {model!r}")
     return 0
 
 

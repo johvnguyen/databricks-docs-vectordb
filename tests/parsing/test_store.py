@@ -45,6 +45,7 @@ def make_chunk(url: str, index: int, chunk_id: str | None = None, **overrides) -
         "text": f"chunk {index} text",
         "char_count": len(f"chunk {index} text"),
         "token_count": None,
+        "token_count_model": None,
         "is_oversized": False,
         "last_updated": "2026-09-11",
         "page_sha256": "ab" * 32,
@@ -293,53 +294,139 @@ def test_all_summaries_after_a_replace_reflects_only_the_current_chunks(store):
     assert len(store.all_summaries()) == 1
 
 
-# -- chunks_missing_token_count / set_token_counts --------------------------
+# -- chunks_needing_token_count / set_token_counts ---------------------------
+
+MODEL_A = "text-embedding-3-small"
+MODEL_B = "text-embedding-3-large"
 
 
-def test_chunks_missing_token_count_is_empty_for_an_empty_store(store):
-    assert store.chunks_missing_token_count() == []
+def test_chunks_needing_token_count_is_empty_for_an_empty_store(store):
+    assert store.chunks_needing_token_count(MODEL_A) == []
 
 
-def test_chunks_missing_token_count_lists_every_null_row(store):
+def test_chunks_needing_token_count_lists_every_never_tokenized_row(store):
     store.replace_page_chunks(URL_A, make_page(URL_A, 2), now=T1)
-    missing = store.chunks_missing_token_count()
-    assert sorted(missing) == sorted(
+    needing = store.chunks_needing_token_count(MODEL_A)
+    assert sorted(needing) == sorted(
         ChunkText(c.chunk_id, c.text) for c in store.get_chunks(URL_A)
     )
 
 
-def test_chunks_missing_token_count_excludes_rows_that_already_have_one(store):
+def test_chunks_needing_token_count_excludes_rows_already_tagged_with_that_model(store):
     chunks = make_page(URL_A, 2)
-    chunks[0] = replace(chunks[0], token_count=5)
+    chunks[0] = replace(chunks[0], token_count=5, token_count_model=MODEL_A)
     store.replace_page_chunks(URL_A, chunks, now=T1)
-    missing = store.chunks_missing_token_count()
-    assert [m.chunk_id for m in missing] == [chunks[1].chunk_id]
+    needing = store.chunks_needing_token_count(MODEL_A)
+    assert [n.chunk_id for n in needing] == [chunks[1].chunk_id]
 
 
-def test_set_token_counts_writes_the_given_values(store):
+def test_chunks_needing_token_count_includes_rows_tagged_with_a_different_model(store):
+    chunks = make_page(URL_A, 2)
+    chunks[0] = replace(chunks[0], token_count=5, token_count_model=MODEL_A)
+    store.replace_page_chunks(URL_A, chunks, now=T1)
+    # Asking for MODEL_B: the MODEL_A-tagged row needs (re-)tokenizing too --
+    # this is what lets you test/compare a different tokenizer.
+    needing = store.chunks_needing_token_count(MODEL_B)
+    assert {n.chunk_id for n in needing} == {c.chunk_id for c in chunks}
+
+
+def test_set_token_counts_writes_the_given_values_and_model(store):
     store.replace_page_chunks(URL_A, make_page(URL_A, 2), now=T1)
     ids = [c.chunk_id for c in store.get_chunks(URL_A)]
-    updated = store.set_token_counts({ids[0]: 7, ids[1]: 42})
+    updated = store.set_token_counts({ids[0]: 7, ids[1]: 42}, MODEL_A)
     assert updated == 2
     chunks = {c.chunk_id: c for c in store.get_chunks(URL_A)}
     assert chunks[ids[0]].token_count == 7
+    assert chunks[ids[0]].token_count_model == MODEL_A
     assert chunks[ids[1]].token_count == 42
+    assert chunks[ids[1]].token_count_model == MODEL_A
 
 
-def test_set_token_counts_clears_the_missing_list(store):
+def test_set_token_counts_clears_the_needing_list_for_that_model_only(store):
     store.replace_page_chunks(URL_A, make_page(URL_A, 2), now=T1)
     ids = [c.chunk_id for c in store.get_chunks(URL_A)]
-    store.set_token_counts({i: 1 for i in ids})
-    assert store.chunks_missing_token_count() == []
+    store.set_token_counts({i: 1 for i in ids}, MODEL_A)
+    assert store.chunks_needing_token_count(MODEL_A) == []
+    # But it's now "needing" again under a different model -- that's the
+    # point: testing a different tokenizer re-tokenizes rather than reusing
+    # a stale count.
+    assert len(store.chunks_needing_token_count(MODEL_B)) == 2
 
 
 def test_set_token_counts_skips_chunk_ids_no_longer_in_the_store(store):
     store.replace_page_chunks(URL_A, make_page(URL_A, 1), now=T1)
-    updated = store.set_token_counts({"does-not-exist": 1})
+    updated = store.set_token_counts({"does-not-exist": 1}, MODEL_A)
     assert updated == 0
 
 
 def test_set_token_counts_with_an_empty_mapping_does_nothing(store):
     store.replace_page_chunks(URL_A, make_page(URL_A, 1), now=T1)
-    assert store.set_token_counts({}) == 0
-    assert len(store.chunks_missing_token_count()) == 1
+    assert store.set_token_counts({}, MODEL_A) == 0
+    assert len(store.chunks_needing_token_count(MODEL_A)) == 1
+
+
+# -- version 1 -> 2 migration (adds token_count_model) -----------------------
+
+
+def test_opening_a_version_1_store_adds_the_column_and_bumps_the_version(db_path):
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE chunks ("
+        " chunk_id TEXT PRIMARY KEY, url TEXT NOT NULL, source TEXT NOT NULL,"
+        " cloud TEXT NOT NULL, chunk_index INTEGER NOT NULL,"
+        " prev_chunk_id TEXT, next_chunk_id TEXT, heading_path TEXT NOT NULL,"
+        " section_path TEXT NOT NULL, doc_title TEXT NOT NULL,"
+        " description TEXT, text TEXT NOT NULL, char_count INTEGER NOT NULL,"
+        " token_count INTEGER,"
+        " is_oversized INTEGER NOT NULL DEFAULT 0, last_updated TEXT,"
+        " page_sha256 TEXT NOT NULL, fetched_at TEXT, parsed_at TEXT NOT NULL,"
+        " UNIQUE (url, chunk_index))"
+    )
+    conn.execute(
+        "INSERT INTO chunks (chunk_id, url, source, cloud, chunk_index,"
+        " heading_path, section_path, doc_title, text, char_count,"
+        " token_count, page_sha256, parsed_at)"
+        " VALUES ('x', 'u', 's', 'c', 0, 'h', 'p', 'd', 'txt', 3, 99, 'sha', 'now')"
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    with ChunkStore(db_path) as store:
+        chunk = store.get_chunks("u")[0]
+        # The pre-existing token_count survives the migration untouched...
+        assert chunk.token_count == 99
+        # ...but with no tracked model, it's treated as needing (re-)
+        # tokenizing under whatever model is asked for.
+        assert chunk.token_count_model is None
+        assert store.chunks_needing_token_count(MODEL_A) == [ChunkText("x", "txt")]
+
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    conn.close()
+
+
+def test_reopening_a_migrated_store_is_a_no_op(db_path):
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE chunks ("
+        " chunk_id TEXT PRIMARY KEY, url TEXT NOT NULL, source TEXT NOT NULL,"
+        " cloud TEXT NOT NULL, chunk_index INTEGER NOT NULL,"
+        " prev_chunk_id TEXT, next_chunk_id TEXT, heading_path TEXT NOT NULL,"
+        " section_path TEXT NOT NULL, doc_title TEXT NOT NULL,"
+        " description TEXT, text TEXT NOT NULL, char_count INTEGER NOT NULL,"
+        " token_count INTEGER,"
+        " is_oversized INTEGER NOT NULL DEFAULT 0, last_updated TEXT,"
+        " page_sha256 TEXT NOT NULL, fetched_at TEXT, parsed_at TEXT NOT NULL,"
+        " UNIQUE (url, chunk_index))"
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    with ChunkStore(db_path):
+        pass
+    with ChunkStore(db_path) as store:  # second open: already at SCHEMA_VERSION
+        assert store.counts() == ChunkCounts(0, 0, 0)

@@ -33,6 +33,7 @@ def make_chunk(index: int, **overrides) -> Chunk:
         "text": "hello world",
         "char_count": len("hello world"),
         "token_count": None,
+        "token_count_model": None,
         "is_oversized": False,
         "last_updated": "2026-09-11",
         "page_sha256": "ab" * 32,
@@ -91,3 +92,42 @@ def test_backfill_tokens_on_an_empty_store_says_so(env, capsys):
         pass  # creates the (empty) store, nothing more
     assert main(["embed", "backfill-tokens"]) == 0
     assert "nothing to backfill" in capsys.readouterr().out
+
+
+# -- embed backfill-tokens --model (testing a different tokenizer) ----------
+
+
+def test_backfill_tokens_model_flag_tags_rows_with_the_override_not_the_configured_model(
+    env, capsys
+):
+    with ChunkStore(env / "parsed.sqlite") as store:
+        store.replace_page_chunks(URL_A, [make_chunk(0, text="hello world")])
+
+    assert main(["embed", "backfill-tokens", "--model", "text-embedding-3-large"]) == 0
+    out = capsys.readouterr().out
+    assert "model: text-embedding-3-large" in out
+
+    with ChunkStore(env / "parsed.sqlite") as store:
+        chunk = store.get_chunks(URL_A)[0]
+        assert chunk.token_count_model == "text-embedding-3-large"
+
+
+def test_backfill_tokens_model_flag_re_tokenizes_a_row_already_done_under_another_model(
+    env, capsys
+):
+    with ChunkStore(env / "parsed.sqlite") as store:
+        store.replace_page_chunks(URL_A, [make_chunk(0, text="hello world")])
+    main(["embed", "backfill-tokens"])  # tags it with the configured model
+    capsys.readouterr()
+
+    # Switching tokenizers via --model re-tokenizes rather than treating the
+    # existing count as current.
+    assert main(["embed", "backfill-tokens", "--model", "text-embedding-3-large"]) == 0
+    out = capsys.readouterr().out
+    assert "1 chunk(s) given a real token_count" in out
+
+    # And switching back re-tokenizes again, not a permanent no-op either.
+    assert main(["embed", "backfill-tokens"]) == 0
+    out = capsys.readouterr().out
+    assert "1 chunk(s) given a real token_count" in out
+    assert "model: text-embedding-3-small" in out

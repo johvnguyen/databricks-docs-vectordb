@@ -37,6 +37,7 @@ def make_chunk(index: int, **overrides) -> Chunk:
         "text": "hello world",
         "char_count": len("hello world"),
         "token_count": None,
+        "token_count_model": None,
         "is_oversized": False,
         "last_updated": "2026-09-11",
         "page_sha256": "ab" * 32,
@@ -95,12 +96,28 @@ def test_backfill_on_an_empty_store_does_nothing(store):
     assert backfill_token_counts(store, OPENAI_SMALL) == 0
 
 
-def test_backfill_leaves_rows_that_already_have_a_count_alone(store):
-    chunk = make_chunk(0, text="hello world", token_count=999)
+def test_backfill_leaves_rows_already_tagged_with_that_model_alone(store):
+    chunk = make_chunk(
+        0, text="hello world", token_count=999, token_count_model=OPENAI_SMALL
+    )
     store.replace_page_chunks(URL_A, [chunk])
     updated = backfill_token_counts(store, OPENAI_SMALL)
     assert updated == 0
     assert store.get_chunks(URL_A)[0].token_count == 999
+
+
+def test_backfill_re_tokenizes_under_a_different_model(store):
+    # Testing a different tokenizer: a row already tagged with one model
+    # is re-tokenized, not skipped, when asked for a different one.
+    chunk = make_chunk(
+        0, text="hello world", token_count=999, token_count_model=OPENAI_SMALL
+    )
+    store.replace_page_chunks(URL_A, [chunk])
+    updated = backfill_token_counts(store, OPENAI_LARGE)
+    assert updated == 1
+    result = store.get_chunks(URL_A)[0]
+    assert result.token_count == 2  # real count, not the old placeholder
+    assert result.token_count_model == OPENAI_LARGE
 
 
 def test_a_second_backfill_run_touches_nothing(store):
@@ -120,5 +137,7 @@ def test_backfill_only_touches_the_pages_a_reparse_actually_changed(store):
     # Re-parsing just one page resets its token_count to NULL again
     # (chunker.py still doesn't set it); the other page's is untouched.
     store.replace_page_chunks(URL_A, [make_chunk(0, text="hello world, again")])
-    assert [c.chunk_id for c in store.chunks_missing_token_count()] == [a.chunk_id]
+    assert [c.chunk_id for c in store.chunks_needing_token_count(OPENAI_SMALL)] == [
+        a.chunk_id
+    ]
     assert backfill_token_counts(store, OPENAI_SMALL) == 1

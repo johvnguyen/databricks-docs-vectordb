@@ -43,22 +43,24 @@ def count_tokens(text: str, model: str) -> int:
 
 
 def backfill_token_counts(store: ChunkStore, model: str) -> int:
-    """Fill in a real `token_count` for every chunk that doesn't have one
-    yet, using `model`'s tokenizer.
+    """Fill in a real `token_count` for every chunk not already tagged as
+    tokenized under `model`, using `model`'s tokenizer.
 
-    `parsed.sqlite.chunks.token_count` is `NULL` on every row until this
-    runs -- Phase 2 never picks a tokenizer (`parsing.md`'s Resolved
-    question 6), since no embedding model existed yet. A metadata fill-in
-    only: `parsed.sqlite`'s `text` and chunk boundaries are untouched, and
-    a chunk that already has a `token_count` is left alone -- so a second
-    run with nothing changed touches nothing, and a run after a later
-    re-parse only touches the pages that were actually re-parsed (`chunker.py`
-    still doesn't set `token_count` on the chunks it produces).
+    A metadata fill-in only: `parsed.sqlite`'s `text` and chunk boundaries
+    are untouched. `chunk_id`s already tagged with `model` (`
+    token_count_model`) are left alone, so a second run with nothing
+    changed touches nothing, and a run after a later re-parse only touches
+    the pages that were actually re-parsed (`chunker.py` still doesn't set
+    either column). Passing a *different* `model` than what's currently
+    tagged -- whether because the configured model changed or because
+    you're deliberately comparing tokenizers -- re-tokenizes everything
+    under the new one; nothing here treats the previous model's counts as
+    authoritative just because they're already filled in.
 
     Returns how many chunks were updated.
     """
-    missing = store.chunks_missing_token_count()
-    if not missing:
+    candidates = store.chunks_needing_token_count(model)
+    if not candidates:
         return 0
-    counts = {chunk_id: count_tokens(text, model) for chunk_id, text in missing}
-    return store.set_token_counts(counts)
+    counts = {chunk_id: count_tokens(text, model) for chunk_id, text in candidates}
+    return store.set_token_counts(counts, model)
