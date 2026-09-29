@@ -67,6 +67,7 @@ def test_defaults_match_the_design_doc():
     assert settings.breaker_threshold == 10
     assert settings.breaker_cooldown == 600.0
     assert settings.breaker_max_trips == 3
+    assert settings.fatal_error_threshold == 5
 
 
 def test_loading_requires_no_provider_api_key(no_dotenv, monkeypatch):
@@ -116,6 +117,7 @@ def test_none_overrides_are_ignored(no_dotenv):
         {"breaker_threshold": 0},
         {"breaker_cooldown": -1},
         {"breaker_max_trips": 0},
+        {"fatal_error_threshold": 0},
     ],
     ids=lambda o: ",".join(f"{k}={v}" for k, v in o.items()),
 )

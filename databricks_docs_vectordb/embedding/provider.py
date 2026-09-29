@@ -29,6 +29,8 @@ import litellm
 import openai
 from litellm import exceptions as llm_errors
 
+from databricks_docs_vectordb.embedding.store import ModelInfo
+
 
 class EmbeddingError(Exception):
     """An embedding call failed in a way retrying it now won't fix."""
@@ -64,6 +66,17 @@ _RETRYABLE = (
     llm_errors.ServiceUnavailableError,
     llm_errors.BadGatewayError,
 )
+
+
+def configured_model_info(model: str) -> ModelInfo:
+    """The `(provider, model, model_version)` a config `model` string should
+    produce, as LiteLLM resolves it (`"azure/my-deployment"` -> provider
+    `azure`, model `my-deployment`) -- what the runner compares stored rows
+    against, and what a failed or rejected row records, since no response
+    came back to report anything. `model_version` is None for the same
+    reason `embed` reports None (see Versioning)."""
+    name, provider, _, _ = litellm.get_llm_provider(model)
+    return ModelInfo(provider, name, None)
 
 
 async def embed(
@@ -108,18 +121,15 @@ def _read_response(
             f"inconsistent vector lengths in one response: {sorted(dimensions)}"
         )
 
+    # What LiteLLM routed to and what the provider says served the request.
+    # Each falls back to how LiteLLM resolves the configured name only when
+    # the response doesn't say.
     hidden = getattr(response, "_hidden_params", None) or {}
-    provider = hidden.get("custom_llm_provider")
-    if not provider:
-        # Only when LiteLLM didn't record where it routed; fall back to how
-        # it would resolve the name.
-        _, provider, _, _ = litellm.get_llm_provider(requested_model)
+    fallback = configured_model_info(requested_model)
     return EmbeddingBatch(
         vectors=vectors,
-        provider=provider,
-        # What the provider says served the request. Falls back to the
-        # requested name only for a provider that echoes nothing.
-        model=response.model or requested_model,
+        provider=hidden.get("custom_llm_provider") or fallback.provider,
+        model=response.model or fallback.model,
         # No provider we use today reports a snapshot distinct from the
         # model name (OpenAI's text-embedding-3-* don't) -- see Versioning.
         model_version=None,

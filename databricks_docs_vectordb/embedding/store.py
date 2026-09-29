@@ -121,6 +121,14 @@ class EmbeddingCounts(NamedTuple):
     rejected: int
 
 
+class StoredChunk(NamedTuple):
+    """What's stored for one chunk_id, across all its sub_index rows."""
+
+    chunk_text_hash: str
+    model_info: ModelInfo
+    any_failed: bool  # at least one row has status='failed'
+
+
 class EmbeddingSummary(NamedTuple):
     chunk_id: str
     sub_index: int
@@ -290,6 +298,29 @@ class EmbeddingsStore:
         if row is None:
             return None
         return ModelInfo(row["provider"], row["model"], row["model_version"])
+
+    def stored_chunks(self) -> dict[str, StoredChunk]:
+        """A `StoredChunk` per chunk_id, in one query -- the bulk form of
+        `get_hash` + `get_model_info` (plus whether any row failed), for
+        the runner's candidate selection over every chunk in the corpus.
+
+        `chunk_text_hash` and the model columns are shared across a
+        chunk_id's rows (they're written together by one `upsert`), so
+        SQLite's pick of which row to read them from doesn't matter.
+        """
+        rows = self._conn.execute(
+            "SELECT chunk_id, chunk_text_hash, provider, model, model_version,"
+            " MAX(status = 'failed') AS any_failed"
+            " FROM embeddings GROUP BY chunk_id"
+        )
+        return {
+            row["chunk_id"]: StoredChunk(
+                row["chunk_text_hash"],
+                ModelInfo(row["provider"], row["model"], row["model_version"]),
+                bool(row["any_failed"]),
+            )
+            for row in rows
+        }
 
     def all_summaries(self) -> list[EmbeddingSummary]:
         """A lightweight `EmbeddingSummary` per row, for `embed status` and

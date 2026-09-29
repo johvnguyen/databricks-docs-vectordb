@@ -55,6 +55,14 @@ class Settings:
     breaker_cooldown: float = 600.0
     breaker_max_trips: int = 3
 
+    # Consecutive non-retryable errors (a bad API key, an unknown model, a
+    # malformed request) that end the run early. These don't feed the
+    # breaker -- the provider *is* answering -- but a run of them almost
+    # always means every remaining batch would fail the same way.
+    fatal_error_threshold: int = 5
+
+    progress_every: int = 1000  # log a progress line every N chunks
+
     def __post_init__(self) -> None:
         if not self.model:
             raise ValueError("model must not be empty")
@@ -71,6 +79,8 @@ class Settings:
             "retry_after_max",
             "breaker_threshold",
             "breaker_max_trips",
+            "fatal_error_threshold",
+            "progress_every",
         )
         for name in positive:
             if getattr(self, name) <= 0:

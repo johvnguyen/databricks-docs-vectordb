@@ -1,5 +1,5 @@
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -254,6 +254,14 @@ class ChunkStore:
             "SELECT * FROM chunks WHERE url = ? ORDER BY chunk_index", (url,)
         )
         return [_row_to_chunk(row) for row in rows]
+
+    def iter_chunks(self) -> Iterator[Chunk]:
+        """Every chunk, ordered by `(url, chunk_index)`, streamed rather
+        than loaded at once -- for Phase 3's candidate selection
+        (`embedding/runner.py`), which needs each chunk's full text to hash
+        it but keeps only the ones that need embedding."""
+        for row in self._conn.execute("SELECT * FROM chunks ORDER BY url, chunk_index"):
+            yield _row_to_chunk(row)
 
     def counts(self) -> ChunkCounts:
         """Pages parsed, chunks produced, and how many are oversized."""
