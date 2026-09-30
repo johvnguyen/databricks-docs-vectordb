@@ -105,6 +105,11 @@ class Settings:
         """This phase's own output: the embeddings store."""
         return self.data_dir / "embeddings.sqlite"
 
+    @property
+    def logs_dir(self) -> Path:
+        """Shared with scraping: `embed run` logs beside `scrape fetch`."""
+        return self.data_dir / "logs"
+
     @classmethod
     def load(
         cls,

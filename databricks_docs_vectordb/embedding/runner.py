@@ -88,6 +88,30 @@ def candidate_reason(
     return None
 
 
+def select_candidates(
+    chunks: ChunkStore,
+    embeddings: EmbeddingsStore,
+    current: ModelInfo,
+    limit: int | None = None,
+) -> tuple[list[tuple[Chunk, str]], Counter[str]]:
+    """`(chunk, chunk_text_hash)` for every chunk that needs embedding under
+    `current`, in `(url, chunk_index)` order (only the first `limit` if
+    given), and a tally of why each was picked. Shared by the runner and
+    `embed status`; reads both stores, never writes."""
+    stored = embeddings.stored_chunks()
+    selected: list[tuple[Chunk, str]] = []
+    reasons: Counter[str] = Counter()
+    for chunk in chunks.iter_chunks():
+        if limit is not None and len(selected) >= limit:
+            break
+        chunk_hash = text_hash(chunk.text)
+        reason = candidate_reason(chunk_hash, stored.get(chunk.chunk_id), current)
+        if reason is not None:
+            reasons[reason] += 1
+            selected.append((chunk, chunk_hash))
+    return selected, reasons
+
+
 def pack[T](
     items: Iterable[T],
     *,
@@ -242,21 +266,12 @@ class Runner:
             self._stop.set()
 
     def select(self, limit: int | None = None) -> list[tuple[Chunk, str]]:
-        """`(chunk, chunk_text_hash)` for every chunk that needs embedding,
-        in `(url, chunk_index)` order, first `limit` only if given. Also
-        tallies why each was picked, for the summary."""
-        stored = self._embeddings.stored_chunks()
-        selected: list[tuple[Chunk, str]] = []
-        for chunk in self._chunks.iter_chunks():
-            if limit is not None and len(selected) >= limit:
-                break
-            chunk_hash = text_hash(chunk.text)
-            reason = candidate_reason(
-                chunk_hash, stored.get(chunk.chunk_id), self._model
-            )
-            if reason is not None:
-                self._reasons[reason] += 1
-                selected.append((chunk, chunk_hash))
+        """This run's candidates (see `select_candidates`); also tallies why
+        each was picked, for the summary."""
+        selected, reasons = select_candidates(
+            self._chunks, self._embeddings, self._model, limit
+        )
+        self._reasons.update(reasons)
         return selected
 
     async def run(

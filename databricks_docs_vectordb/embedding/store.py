@@ -129,6 +129,12 @@ class StoredChunk(NamedTuple):
     any_failed: bool  # at least one row has status='failed'
 
 
+class ChunkProblem(NamedTuple):
+    chunk_id: str
+    url: str
+    error: str | None
+
+
 class EmbeddingSummary(NamedTuple):
     chunk_id: str
     sub_index: int
@@ -321,6 +327,26 @@ class EmbeddingsStore:
             )
             for row in rows
         }
+
+    def chunks_with_status(
+        self, status: str, limit: int | None = None
+    ) -> tuple[int, list[ChunkProblem]]:
+        """How many distinct chunks have a row with `status`, and the first
+        `limit` of them (all if None) with their error -- for `embed
+        status`'s failed/rejected listing. One entry per chunk_id, not per
+        row: a split chunk's rows share one outcome and one error."""
+        if status not in STATUSES:
+            raise ValueError(f"unknown status {status!r}")
+        total = self._conn.execute(
+            "SELECT COUNT(DISTINCT chunk_id) FROM embeddings WHERE status = ?",
+            (status,),
+        ).fetchone()[0]
+        rows = self._conn.execute(
+            "SELECT chunk_id, url, MIN(error) AS error FROM embeddings"
+            " WHERE status = ? GROUP BY chunk_id ORDER BY chunk_id LIMIT ?",
+            (status, -1 if limit is None else limit),
+        )
+        return total, [ChunkProblem(r["chunk_id"], r["url"], r["error"]) for r in rows]
 
     def all_summaries(self) -> list[EmbeddingSummary]:
         """A lightweight `EmbeddingSummary` per row, for `embed status` and
