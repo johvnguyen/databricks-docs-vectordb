@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import signal
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -579,3 +580,82 @@ def test_status_notices_a_model_change_as_work_to_do(
     patch_settings(monkeypatch, model="text-embedding-3-large")
     main(["embed", "status"])
     assert "5 chunk(s) still to embed (5 model)" in capsys.readouterr().out
+
+
+# =========================================================================
+# embed verify
+# =========================================================================
+
+
+def test_verify_without_a_chunk_store_is_an_error(env, capsys):
+    assert main(["embed", "verify"]) == 1
+    assert "parse run" in capsys.readouterr().err
+
+
+def test_verify_before_any_run_reports_coverage_and_creates_nothing(env, capsys):
+    add_pages(env, 3)
+    assert main(["embed", "verify"]) == 0
+    out = capsys.readouterr().out
+    assert "3 not-embedded" in out
+    assert "not violations unless --complete" in out
+    assert out.rstrip().endswith("OK")
+    assert not (env / "embeddings.sqlite").exists()
+
+
+def test_verify_complete_before_any_run_fails(env, capsys):
+    add_pages(env, 3)
+    assert main(["embed", "verify", "--complete"]) == 1
+    assert "FAILED: 3 violations" in capsys.readouterr().out
+
+
+def test_verify_passes_after_a_full_run_without_a_key_or_network(
+    env, embed_env, monkeypatch, capsys
+):
+    embed_run()
+    capsys.readouterr()
+    monkeypatch.delenv("OPENAI_API_KEY")
+    embed_env.calls.clear()
+
+    assert main(["embed", "verify", "--complete"]) == 0
+    out = capsys.readouterr().out
+    assert "coverage (chunks): 5 ok" in out
+    assert "openai/text-embedding-3-small/- (3)" in out
+    assert out.rstrip().endswith("OK")
+    assert embed_env.calls == []
+
+
+def test_verify_flags_a_corrupt_blob_and_exits_1(env, embed_env, capsys):
+    embed_run()
+    capsys.readouterr()
+    with EmbeddingsStore(env / "embeddings.sqlite") as store, store._conn:
+        store._conn.execute(
+            "UPDATE embeddings SET embedding = ? WHERE chunk_id = ?",
+            (b"short", f"{page_url(2)}#0"),
+        )
+    assert main(["embed", "verify"]) == 1
+    out = capsys.readouterr().out
+    assert f"[bad-blob-length] {page_url(2)}#0" in out
+
+
+def test_verify_flags_orphaned_rows_after_a_reparse(env, embed_env, capsys):
+    embed_run()
+    capsys.readouterr()
+    with ChunkStore(env / "parsed.sqlite") as store:
+        store.replace_page_chunks(page_url(4), [])
+    assert main(["embed", "verify"]) == 1
+    assert f"[orphaned-rows] {page_url(4)}#0" in capsys.readouterr().out
+
+
+def dump(path: Path) -> list[str]:
+    # Logical contents, not bytes: opening any store bumps SQLite's
+    # file-change counter in the header even when no row changes.
+    with sqlite3.connect(path) as conn:
+        return list(conn.iterdump())
+
+
+def test_verify_changes_nothing(env, embed_env):
+    embed_run()
+    before = {name: dump(env / name) for name in ("embeddings.sqlite", "parsed.sqlite")}
+    main(["embed", "verify", "--complete"])
+    after = {name: dump(env / name) for name in ("embeddings.sqlite", "parsed.sqlite")}
+    assert after == before

@@ -385,4 +385,5 @@ def test_embedding_summary_is_a_plain_namedtuple():
         "model_version",
         "dimensions",
         "blob_len",
+        "chunk_text_hash",
     )

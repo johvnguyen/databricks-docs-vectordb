@@ -145,6 +145,7 @@ class EmbeddingSummary(NamedTuple):
     model_version: str | None
     dimensions: int | None
     blob_len: int | None  # LENGTH(embedding); None when embedding is NULL
+    chunk_text_hash: str
 
 
 class EmbeddingsStore:
@@ -361,8 +362,8 @@ class EmbeddingsStore:
         """
         rows = self._conn.execute(
             "SELECT chunk_id, sub_index, sub_count, status, provider, model,"
-            " model_version, dimensions, LENGTH(embedding) AS blob_len"
-            " FROM embeddings"
+            " model_version, dimensions, LENGTH(embedding) AS blob_len,"
+            " chunk_text_hash FROM embeddings ORDER BY chunk_id, sub_index"
         )
         return [
             EmbeddingSummary(
@@ -375,6 +376,7 @@ class EmbeddingsStore:
                 row["model_version"],
                 row["dimensions"],
                 row["blob_len"],
+                row["chunk_text_hash"],
             )
             for row in rows
         ]

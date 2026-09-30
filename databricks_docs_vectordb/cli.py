@@ -19,6 +19,10 @@ from databricks_docs_vectordb.embedding.runner import RunSummary as EmbeddingSum
 from databricks_docs_vectordb.embedding.runner import select_candidates
 from databricks_docs_vectordb.embedding.store import EmbeddingsStore
 from databricks_docs_vectordb.embedding.tokens import backfill_token_counts
+from databricks_docs_vectordb.embedding.verify import (
+    format_report as format_embed_verify,
+)
+from databricks_docs_vectordb.embedding.verify import verify_embeddings
 from databricks_docs_vectordb.parsing.config import Settings as ParsingSettings
 from databricks_docs_vectordb.parsing.pipeline import is_current, parse_pages
 from databricks_docs_vectordb.parsing.report import (
@@ -311,6 +315,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="show what has been embedded, what failed or was rejected, and "
         "what's left to embed (no network)",
     )
+
+    embed_verify = embed_sub.add_parser(
+        "verify",
+        help="check the embeddings store against parsed.sqlite and itself (no network)",
+        description=(
+            "Check every stored row set is well-formed (sub_index/sub_count, "
+            "rows of a chunk agree, BLOB length matches dimensions) and "
+            "belongs to a chunk still in parsed.sqlite (no orphans); report "
+            "coverage by chunk and row counts by status and by provider/"
+            "model/version. Reports every problem; exits 1 if there are any."
+        ),
+    )
+    embed_verify.add_argument(
+        "--complete",
+        action="store_true",
+        help="embedding should be finished: chunks never embedded, embedded "
+        "under old text, or under a different model are violations "
+        "(failed/rejected ones are not)",
+    )
     return parser
 
 
@@ -381,6 +404,8 @@ def main_embed(args: argparse.Namespace) -> int:
             return run_embed_run(settings, args)
         case "status":
             return run_embed_status(settings)
+        case "verify":
+            return run_embed_verify(settings, args)
     return 2
 
 
@@ -848,6 +873,23 @@ def run_embed_status(settings: EmbeddingSettings) -> int:
         else:
             print(f"every chunk in {settings.parsed_path} is embedded and current")
     return 0
+
+
+def run_embed_verify(settings: EmbeddingSettings, args: argparse.Namespace) -> int:
+    require_parsed(settings)
+    model = configured_model_info(settings.model)
+    with ChunkStore(settings.parsed_path) as chunks:
+        # Opening the store would create it; with none yet, every chunk is
+        # simply not embedded.
+        if settings.embeddings_path.exists():
+            with EmbeddingsStore(settings.embeddings_path) as embeddings:
+                report = verify_embeddings(
+                    chunks, embeddings, model, complete=args.complete
+                )
+        else:
+            report = verify_embeddings(chunks, None, model, complete=args.complete)
+    print(format_embed_verify(report, str(settings.embeddings_path)))
+    return 0 if report.ok else 1
 
 
 if __name__ == "__main__":
