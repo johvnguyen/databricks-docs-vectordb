@@ -284,11 +284,22 @@ def build_parser() -> argparse.ArgumentParser:
             "are not embedded twice."
         ),
     )
-    embed_run.add_argument(
+    embed_size = embed_run.add_mutually_exclusive_group()
+    embed_size.add_argument(
         "--limit",
         type=positive_int,
         metavar="N",
         help="embed at most N chunks, then stop (default: all)",
+    )
+    embed_size.add_argument(
+        "--sample",
+        type=positive_int,
+        metavar="N",
+        help="embed about N chunks spread across every section of every "
+        "source (at least 2 per section), always including the longest and "
+        "shortest chunk still to embed -- the pilot run. The same candidate "
+        "chunks always give the same sample. Refuses an N too small to cover "
+        "every section and says how many it needs",
     )
     embed_run.add_argument(
         "--rate",
@@ -753,7 +764,7 @@ def run_embed_run(settings: EmbeddingSettings, args: argparse.Namespace) -> int:
         EmbeddingsStore(settings.embeddings_path) as embeddings,
     ):
         runner = EmbeddingRunner(settings, chunks, embeddings)
-        summary = asyncio.run(runner.run(limit=args.limit))
+        summary = asyncio.run(runner.run(limit=args.limit, sample=args.sample))
         counts = embeddings.counts()
         failed, _ = embeddings.chunks_with_status("failed", limit=0)
         rejected, _ = embeddings.chunks_with_status("rejected", limit=0)

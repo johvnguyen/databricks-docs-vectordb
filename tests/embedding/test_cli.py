@@ -320,6 +320,61 @@ def test_nonsense_flag_values_are_usage_errors(env, flags):
     assert excinfo.value.code == 2
 
 
+def add_sectioned_pages(data_dir: Path, sections: dict[str, int]) -> None:
+    with ChunkStore(data_dir / "parsed.sqlite") as store:
+        for section, pages in sections.items():
+            for p in range(pages):
+                url = f"https://docs.databricks.com/aws/en/{section}/p{p:02d}"
+                store.replace_page_chunks(
+                    url,
+                    [
+                        make_chunk(
+                            0, chunk_id=f"{url}#0", url=url, text=f"{section} {p}"
+                        )
+                    ],
+                )
+
+
+def test_sample_embeds_a_spread_and_a_rerun_samples_what_is_left(
+    env, embed_env, monkeypatch, caplog, capsys
+):
+    add_sectioned_pages(
+        env, {"delta": 20, "sql": 20, "ml": 20}
+    )  # plus 5 from embed_env
+    assert embed_run("--sample", "10") == 0
+    out = capsys.readouterr().out
+    first = stored_statuses(env)["ok"]
+    assert 10 <= first <= 12  # N, plus up to the two extremes
+    assert f"this run: {first}/{first} chunk(s)" in out
+    text = log_text(env)
+    assert "sample: " in text and "candidate chunks, from 4 sections" in text
+
+    assert embed_run("--sample", "10") == 0
+    sent = [t for call in embed_env.calls for t in call]
+    assert len(sent) == len(set(sent))  # the second draw skipped the first's
+
+
+def test_sample_too_small_is_refused_with_the_number_needed(env, embed_env, capsys):
+    add_sectioned_pages(env, {"delta": 5, "sql": 5, "ml": 5})
+    assert embed_run("--sample", "3") == 1
+    err = capsys.readouterr().err
+    assert "--sample 3 is too small" in err and "chunks" in err
+    assert embed_env.calls == []
+
+
+def test_sample_and_limit_cannot_be_combined(env):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["embed", "run", "--sample", "5", "--limit", "5"])
+    assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "ten"])
+def test_sample_must_be_a_positive_whole_number(env, value):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["embed", "run", "--sample", value])
+    assert excinfo.value.code == 2
+
+
 def test_there_is_no_retry_failed_flag(env):
     with pytest.raises(SystemExit) as excinfo:
         main(["embed", "run", "--retry-failed"])

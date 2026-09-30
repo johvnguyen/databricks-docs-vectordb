@@ -371,6 +371,37 @@ async def test_limit_takes_the_first_candidates(tmp_path, stores):
     assert [r["chunk_id"] for r in rows(embeddings)] == ids[:2]
 
 
+async def test_sample_embeds_a_stratified_draw_plus_the_extremes(tmp_path, stores):
+    chunks, embeddings = stores
+    # three sections, plus one very long and one near-empty chunk
+    for section in ("delta", "sql", "ml"):
+        for p in range(10):
+            url = f"{AWS}{section}/p{p}"
+            chunks.replace_page_chunks(url, [make_chunk(url, 0, f"{section} text {p}")])
+    long_url, short_url = f"{AWS}notes/big", f"{AWS}notes/tiny"
+    chunks.replace_page_chunks(long_url, [make_chunk(long_url, 0, "word " * 2000)])
+    chunks.replace_page_chunks(short_url, [make_chunk(short_url, 0, "- ")])
+    settings = make_settings(tmp_path, model_token_limit=500, batch_token_budget=1000)
+
+    summary = await runner_with(settings, stores, FakeProvider()).run(
+        sample=8, handle_signals=False
+    )
+
+    stored = {r["chunk_id"] for r in rows(embeddings)}
+    assert f"{long_url}#0" in stored and f"{short_url}#0" in stored
+    assert {cid.split("/")[-2] for cid in stored} == {"delta", "sql", "ml", "notes"}
+    assert summary.selected == len(stored) <= 8 + 2
+    assert summary.reasons == Counter(new=summary.selected)
+    big = [r for r in rows(embeddings) if r["chunk_id"] == f"{long_url}#0"]
+    assert len(big) > 1  # the long one really was split
+
+
+async def test_limit_and_sample_cannot_be_combined(tmp_path, stores):
+    runner = runner_with(make_settings(tmp_path), stores, FakeProvider())
+    with pytest.raises(ValueError):
+        await runner.run(limit=1, sample=1, handle_signals=False)
+
+
 async def test_an_empty_run_completes_at_once(tmp_path, stores):
     settings = make_settings(tmp_path)
     provider = FakeProvider()

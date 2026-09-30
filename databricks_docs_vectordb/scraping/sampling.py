@@ -1,6 +1,6 @@
 import hashlib
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from databricks_docs_vectordb.scraping.config import Source
@@ -26,12 +26,18 @@ class Sample:
         return len(self.allocation)
 
 
+def _url(page: Page) -> str:
+    return page.url
+
+
 def sample_pages(
     pages: Sequence[Page],
     sources: tuple[Source, ...],
     n: int,
     *,
     floor: int = 2,
+    identity: Callable[[Page], str] = _url,
+    noun: str = "pages",
 ) -> Sample:
     """Pick about `n` pages, spread across every section of every source.
 
@@ -47,20 +53,30 @@ def sample_pages(
 
     Raises SampleError if `n` is too small to give every section its `floor`.
     If `n` is at least the number of candidates, every candidate is returned.
+
+    Anything with a `.url` and `.source` can be sampled, not just manifest
+    `Page`s: `embedding/sampling.py` samples chunks, passing the chunk_id as
+    `identity` (what the ranking hashes -- every chunk of a page shares its
+    URL, which would otherwise rank a page's chunks together) and "chunks"
+    as the `noun` in the error message.
     """
+
+    def rank(page: Page) -> str:
+        return hashlib.sha256(identity(page).encode()).hexdigest()
+
     by_section: dict[Section, list[Page]] = defaultdict(list)
     for page in pages:
         by_section[section_of(page, sources)].append(page)
     for members in by_section.values():
-        members.sort(key=_rank)
+        members.sort(key=rank)
 
     sizes = {section: len(members) for section, members in by_section.items()}
     minimum = sum(min(floor, size) for size in sizes.values())
     if n < minimum:
         raise SampleError(
             f"--sample {n} is too small: covering all {len(sizes)} sections with at "
-            f"least {floor} pages each takes {minimum} pages. Use --sample {minimum} "
-            "or more (or --limit for a plain cap)"
+            f"least {floor} {noun} each takes {minimum} {noun}. Use --sample "
+            f"{minimum} or more (or --limit for a plain cap)"
         )
 
     allocation = _allocate(sizes, min(n, len(pages)), floor)
@@ -70,13 +86,9 @@ def sample_pages(
         for page in members[: allocation[section]]
     ]
     chosen.sort(
-        key=_rank
+        key=rank
     )  # fetch order: a pseudo-random mix, so an early stop still spans sections
     return Sample(chosen, dict(sorted(allocation.items())), len(pages), minimum)
-
-
-def _rank(page: Page) -> str:
-    return hashlib.sha256(page.url.encode()).hexdigest()
 
 
 def _allocate(sizes: dict[Section, int], budget: int, floor: int) -> dict[Section, int]:

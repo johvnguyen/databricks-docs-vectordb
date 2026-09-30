@@ -24,7 +24,7 @@ import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import litellm
 
@@ -38,6 +38,7 @@ from databricks_docs_vectordb.embedding.provider import (
     configured_model_info,
     embed,
 )
+from databricks_docs_vectordb.embedding.sampling import sample_chunks
 from databricks_docs_vectordb.embedding.store import (
     EmbeddingRow,
     EmbeddingsStore,
@@ -88,28 +89,32 @@ def candidate_reason(
     return None
 
 
+class Candidate(NamedTuple):
+    chunk: Chunk
+    chunk_hash: str
+    reason: Reason
+
+
 def select_candidates(
     chunks: ChunkStore,
     embeddings: EmbeddingsStore,
     current: ModelInfo,
     limit: int | None = None,
-) -> tuple[list[tuple[Chunk, str]], Counter[str]]:
-    """`(chunk, chunk_text_hash)` for every chunk that needs embedding under
-    `current`, in `(url, chunk_index)` order (only the first `limit` if
-    given), and a tally of why each was picked. Shared by the runner and
-    `embed status`; reads both stores, never writes."""
+) -> tuple[list[Candidate], Counter[str]]:
+    """A `Candidate` for every chunk that needs embedding under `current`,
+    in `(url, chunk_index)` order (only the first `limit` if given), and a
+    tally of why they were picked. Shared by the runner and `embed status`;
+    reads both stores, never writes."""
     stored = embeddings.stored_chunks()
-    selected: list[tuple[Chunk, str]] = []
-    reasons: Counter[str] = Counter()
+    selected: list[Candidate] = []
     for chunk in chunks.iter_chunks():
         if limit is not None and len(selected) >= limit:
             break
         chunk_hash = text_hash(chunk.text)
         reason = candidate_reason(chunk_hash, stored.get(chunk.chunk_id), current)
         if reason is not None:
-            reasons[reason] += 1
-            selected.append((chunk, chunk_hash))
-    return selected, reasons
+            selected.append(Candidate(chunk, chunk_hash, reason))
+    return selected, Counter(c.reason for c in selected)
 
 
 def pack[T](
@@ -265,20 +270,46 @@ class Runner:
             self._stop_reason = reason
             self._stop.set()
 
-    def select(self, limit: int | None = None) -> list[tuple[Chunk, str]]:
-        """This run's candidates (see `select_candidates`); also tallies why
-        each was picked, for the summary."""
-        selected, reasons = select_candidates(
+    def select(
+        self, limit: int | None = None, sample: int | None = None
+    ) -> list[Candidate]:
+        """This run's candidates (see `select_candidates`): all of them, the
+        first `limit`, or a `sample` (see `sampling.sample_chunks`); also
+        tallies why each was picked, for the summary."""
+        if limit is not None and sample is not None:
+            raise ValueError("limit and sample can't be combined")
+        selected, _ = select_candidates(
             self._chunks, self._embeddings, self._model, limit
         )
-        self._reasons.update(reasons)
+        if sample is not None:
+            drawn = sample_chunks(selected, sample)
+            logger.info(
+                "sample: %d of %d candidate chunks, from %d sections (%d needed "
+                "for 2 per section)%s",
+                len(drawn.candidates),
+                len(selected),
+                drawn.sections,
+                drawn.minimum,
+                "".join(
+                    f", plus the {label} ({chunk.char_count} chars, {chunk.chunk_id})"
+                    for label, chunk in drawn.extremes_added
+                ),
+            )
+            selected = drawn.candidates
+        self._reasons.update(c.reason for c in selected)
         return selected
 
     async def run(
-        self, *, limit: int | None = None, handle_signals: bool = True
+        self,
+        *,
+        limit: int | None = None,
+        sample: int | None = None,
+        handle_signals: bool = True,
     ) -> RunSummary:
-        """Embed every candidate chunk (or the first `limit`)."""
-        candidates = self.select(limit)
+        """Embed every candidate chunk, or the first `limit`, or a
+        section-stratified `sample` that always includes the longest and
+        shortest candidates (the pilot run's edge cases)."""
+        candidates = self.select(limit, sample)
         self._selected = len(candidates)
         self._started = self._clock()
         logger.info(
@@ -344,8 +375,8 @@ class Runner:
 
     # -- workers ---------------------------------------------------------
 
-    def _jobs(self, candidates: Sequence[tuple[Chunk, str]]) -> Iterator[_Job]:
-        for chunk, chunk_hash in candidates:
+    def _jobs(self, candidates: Sequence[Candidate]) -> Iterator[_Job]:
+        for chunk, chunk_hash, _ in candidates:
             inputs = assemble_inputs(
                 chunk,
                 model=self._settings.model,
