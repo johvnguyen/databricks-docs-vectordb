@@ -5,7 +5,8 @@
   "features": {
     "ghcr.io/devcontainers/features/node:1": {},  // Needed for Claude Code
     "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
-    "ghcr.io/devcontainers/features/git:1": {}
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
   },
 
   // uv's cache and the project's .venv can sit on different filesystems,
