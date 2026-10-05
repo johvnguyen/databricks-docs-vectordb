@@ -1,6 +1,8 @@
 {
   "name": "databricks-docs-vectordb",
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "dockerComposeFile": "../compose.yaml",
+  "service": "dev",
+  "workspaceFolder": "/workspaces/databricks-docs-vectordb",
 
   "features": {
     "ghcr.io/devcontainers/features/node:1": {},  // Needed for Claude Code
@@ -23,7 +25,6 @@
   },
 
   "mounts": [
-    // HOME is unset on Windows hosts; USERPROFILE is unset elsewhere
     "source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"
   ],
   "remoteUser": "vscode"
