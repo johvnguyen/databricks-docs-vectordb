@@ -11,6 +11,7 @@ from databricks_docs_vectordb.embedding.store import (
     EmbeddingSummary,
     ModelInfo,
     ModelKey,
+    StoredVector,
     pack_embedding,
     unpack_embedding,
 )
@@ -293,6 +294,93 @@ def test_all_summaries_after_a_replace_reflects_only_the_current_rows(store):
     store.upsert(CHUNK_A, make_split(CHUNK_A, 3), now=T1)
     store.upsert(CHUNK_A, make_split(CHUNK_A, 1), now=T2)
     assert len(store.all_summaries()) == 1
+
+
+# -- ok_vectors ----------------------------------------------------------------
+
+CURRENT = ModelInfo("openai", "text-embedding-3-small", None)
+
+
+def test_ok_vectors_is_empty_for_an_empty_store(store):
+    assert list(store.ok_vectors(CURRENT)) == []
+
+
+def test_ok_vectors_carries_the_keys_and_the_vector(store):
+    vector = [1.0, 2.0, 3.0, 4.0]
+    store.upsert(
+        CHUNK_A, [make_row(CHUNK_A, dimensions=4, embedding=pack_embedding(vector))]
+    )
+    [got] = store.ok_vectors(CURRENT)
+    assert got == StoredVector(
+        chunk_id=CHUNK_A,
+        sub_index=0,
+        url="https://docs.databricks.com/aws/en/delta/",
+        source="aws-en",
+        dimensions=4,
+        embedding=pack_embedding(vector),
+    )
+    assert list(unpack_embedding(got.embedding)) == vector
+
+
+def test_ok_vectors_yields_every_slice_of_a_split_chunk(store):
+    store.upsert(CHUNK_A, make_split(CHUNK_A, 3))
+    assert [(v.chunk_id, v.sub_index) for v in store.ok_vectors(CURRENT)] == [
+        (CHUNK_A, 0),
+        (CHUNK_A, 1),
+        (CHUNK_A, 2),
+    ]
+
+
+def test_ok_vectors_skips_failed_and_rejected_rows(store):
+    no_vector = {"dimensions": None, "embedding": None, "error": "boom"}
+    chunk_c = "https://docs.databricks.com/aws/en/delta/#2"
+    store.upsert(CHUNK_A, [make_row(CHUNK_A)])
+    store.upsert(CHUNK_B, [make_row(CHUNK_B, status="failed", **no_vector)])
+    store.upsert(chunk_c, [make_row(chunk_c, status="rejected", **no_vector)])
+    assert [v.chunk_id for v in store.ok_vectors(CURRENT)] == [CHUNK_A]
+
+
+def test_ok_vectors_skips_other_models_rows(store):
+    others = {
+        "https://docs.databricks.com/aws/en/delta/#2": {"provider": "azure"},
+        "https://docs.databricks.com/aws/en/delta/#3": {
+            "model": "text-embedding-3-large"
+        },
+        "https://docs.databricks.com/aws/en/delta/#4": {"model_version": "v2"},
+    }
+    store.upsert(CHUNK_A, [make_row(CHUNK_A)])
+    for chunk_id, overrides in others.items():
+        store.upsert(chunk_id, [make_row(chunk_id, **overrides)])
+    assert [v.chunk_id for v in store.ok_vectors(CURRENT)] == [CHUNK_A]
+
+
+def test_ok_vectors_matches_a_model_version_exactly(store):
+    store.upsert(CHUNK_A, [make_row(CHUNK_A, model_version="v2")])
+    store.upsert(CHUNK_B, [make_row(CHUNK_B)])
+    versioned = CURRENT._replace(model_version="v2")
+    assert [v.chunk_id for v in store.ok_vectors(versioned)] == [CHUNK_A]
+
+
+def test_ok_vectors_come_in_page_order(store):
+    """By url, then chunk_index as a number (#10 after #2), then sub_index,
+    whatever order the rows were written in."""
+    delta = "https://docs.databricks.com/aws/en/delta/"
+    sql = "https://docs.databricks.com/aws/en/sql/"
+    for url, index, n in [(sql, 0, 1), (delta, 10, 2), (delta, 2, 1)]:
+        chunk_id = f"{url}#{index}"
+        store.upsert(chunk_id, make_split(chunk_id, n, chunk_index=index))
+    assert [(v.chunk_id, v.sub_index) for v in store.ok_vectors(CURRENT)] == [
+        (f"{delta}#2", 0),
+        (f"{delta}#10", 0),
+        (f"{delta}#10", 1),
+        (f"{sql}#0", 0),
+    ]
+
+
+def test_ok_vectors_is_read_lazily(store):
+    store.upsert(CHUNK_A, [make_row(CHUNK_A)])
+    vectors = store.ok_vectors(CURRENT)
+    assert iter(vectors) is vectors  # a generator, not a list
 
 
 # -- counts / counts_by_model -------------------------------------------------

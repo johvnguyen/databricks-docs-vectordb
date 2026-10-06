@@ -1,6 +1,6 @@
 import array
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -146,6 +146,18 @@ class EmbeddingSummary(NamedTuple):
     dimensions: int | None
     blob_len: int | None  # LENGTH(embedding); None when embedding is NULL
     chunk_text_hash: str
+
+
+class StoredVector(NamedTuple):
+    """One `ok` row's vector, with what Phase 4 needs to load it into
+    Qdrant (vector_db_integration.md's "Record and collection schema")."""
+
+    chunk_id: str
+    sub_index: int
+    url: str
+    source: str
+    dimensions: int
+    embedding: bytes  # the packed BLOB; `unpack_embedding` decodes it
 
 
 class EmbeddingsStore:
@@ -380,6 +392,37 @@ class EmbeddingsStore:
             )
             for row in rows
         ]
+
+    def ok_vectors(self, model: ModelInfo) -> Iterator[StoredVector]:
+        """A `StoredVector` per `ok` row embedded by `model`, for Phase 4's
+        loader.
+
+        `model` is matched on all of `(provider, model, model_version)`, the
+        way the runner decides a chunk is current (`candidate_reason`), so
+        pass it `configured_model_info(settings.model)`. `failed` and
+        `rejected` rows have no vector and are never yielded.
+
+        Rows come in page order (`url`, then `chunk_index`, then
+        `sub_index`), so one page's rows are always adjacent. They are read
+        from the cursor as they are yielded, so the whole corpus's vectors
+        are never in memory at once.
+        """
+        rows = self._conn.execute(
+            "SELECT chunk_id, sub_index, url, source, dimensions, embedding"
+            " FROM embeddings WHERE status = 'ok'"
+            " AND provider = ? AND model = ? AND model_version IS ?"
+            " ORDER BY url, chunk_index, sub_index",
+            (model.provider, model.model, model.model_version),
+        )
+        for row in rows:
+            yield StoredVector(
+                row["chunk_id"],
+                row["sub_index"],
+                row["url"],
+                row["source"],
+                row["dimensions"],
+                row["embedding"],
+            )
 
     def counts(self) -> EmbeddingCounts:
         """Distinct chunks embedded, total rows, and rows by status."""
