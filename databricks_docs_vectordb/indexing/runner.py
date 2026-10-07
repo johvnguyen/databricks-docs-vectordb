@@ -3,17 +3,22 @@
 
 So far this holds the read side (Step 4), shared with `index verify`: the
 orphan check, and the mapping from an embeddings row to the point it
-becomes. The loader itself is Step 5.
+becomes. Then the loader's first stage (Step 5): comparing the rows with
+what Qdrant holds, to decide what a run is to do before it writes anything.
 """
 
 import array
+import hashlib
 import logging
 import math
 import uuid
 from collections.abc import Container, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from typing import NamedTuple
 
 from databricks_docs_vectordb.embedding.store import StoredVector, unpack_embedding
+from databricks_docs_vectordb.indexing.config import Settings
+from databricks_docs_vectordb.indexing.store import QdrantStore
 from databricks_docs_vectordb.parsing.report import section_of
 from databricks_docs_vectordb.scraping.config import SOURCES, Source
 
@@ -111,3 +116,113 @@ def to_point(
             "section": f"{row.source}/{section_of(row.url, row.source, sources)}",
         },
     )
+
+
+@dataclass(frozen=True)
+class Plan:
+    """What `index run` is to do, decided before anything is written. Each
+    page set holds URLs."""
+
+    collection: str
+    exists: bool  # whether `collection` is already on the server
+    refresh: bool
+    current: frozenset[str]  # points already match the rows: left alone
+    new: frozenset[str]  # rows and no points: loaded
+    changed: frozenset[str]  # points deleted, then the rows loaded
+    removed: frozenset[str]  # points deleted, nothing loaded
+    not_ok: frozenset[str]  # rows not loaded: the page is not `ok` in the manifest
+    old_collections: tuple[str, ...]  # other models' collections, to be deleted
+
+    @property
+    def replaces_anything(self) -> bool:
+        """Whether this run would replace or remove a page, or delete a
+        collection: when the save question is asked (Q29, Q40)."""
+        return bool(self.changed or self.removed or self.old_collections)
+
+
+def compare(
+    qdrant: QdrantStore,
+    collection: str,
+    rows: Iterable[StoredVector],
+    ok_pages: Container[str],
+    settings: Settings,
+    *,
+    refresh: bool = False,
+) -> Plan:
+    """Compare `rows`, the configured model's current rows (after
+    `skip_orphans`), with what `collection` holds, page by page (Q30).
+
+    A page with points has changed if its point IDs differ from its rows',
+    or any stored vector differs from its row's mapped vector (the
+    normalized BLOB). A page whose URL is not in `ok_pages` (the manifest's
+    `ok` pages) counts as having no rows, so its points are removed and its
+    rows are not loaded (Q31). Every other `<prefix>_*` collection is a
+    previous model's (Q37). With `refresh`, every page with points counts
+    as changed, so no vectors are read back.
+
+    Only a hash of each vector is kept, not the vector, and only pages that
+    have points are mapped.
+    """
+    stored: dict[str, dict[str, bytes | None]] = {}  # url -> point ID -> hash
+    exists = qdrant.collection_exists(collection)
+    offset = None
+    while exists:
+        points, offset = qdrant.scroll(
+            collection, offset=offset, with_vectors=not refresh
+        )
+        for point in points:
+            stored.setdefault(point.url, {})[point.id] = (
+                None if point.vector is None else _vector_hash(point.vector)
+            )
+        if offset is None:
+            break
+
+    expected: dict[str, dict[str, bytes | None]] = {}
+    not_ok: set[str] = set()
+    for row in rows:
+        if row.url not in ok_pages:
+            not_ok.add(row.url)
+            continue
+        page = expected.setdefault(row.url, {})
+        if row.url in stored and not refresh:
+            point = to_point(row, normalize=settings.normalize)
+            page[point.id] = _vector_hash(point.vector)
+
+    both = stored.keys() & expected.keys()
+    changed = both if refresh else {u for u in both if stored[u] != expected[u]}
+    prefix = f"{settings.collection_prefix}_"
+    plan = Plan(
+        collection=collection,
+        exists=exists,
+        refresh=refresh,
+        current=frozenset(both - changed),
+        new=frozenset(expected.keys() - stored.keys()),
+        changed=frozenset(changed),
+        removed=frozenset(stored.keys() - expected.keys()),
+        not_ok=frozenset(not_ok),
+        old_collections=tuple(
+            sorted(
+                name
+                for name in qdrant.collection_names()
+                if name.startswith(prefix) and name != collection
+            )
+        ),
+    )
+    logger.info(
+        "compared %s with the rows: %d pages current, %d new, %d changed, "
+        "%d removed, %d not ok in the manifest; %d old collection(s)",
+        collection,
+        len(plan.current),
+        len(plan.new),
+        len(plan.changed),
+        len(plan.removed),
+        len(plan.not_ok),
+        len(plan.old_collections),
+    )
+    return plan
+
+
+def _vector_hash(vector: Sequence[float]) -> bytes:
+    """A hash of `vector` as float32, the precision Qdrant stores, so a
+    vector read back hashes the same as the one written."""
+    return hashlib.blake2b(array.array("f", vector).tobytes(), digest_size=16).digest()

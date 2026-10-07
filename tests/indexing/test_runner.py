@@ -16,13 +16,15 @@ from databricks_docs_vectordb.embedding.store import (
     pack_embedding,
     unpack_embedding,
 )
+from databricks_docs_vectordb.indexing import store as store_module
 from databricks_docs_vectordb.indexing.runner import (
+    compare,
     point_id,
     skip_orphans,
     to_point,
     unit_vector,
 )
-from databricks_docs_vectordb.indexing.store import QdrantStore
+from databricks_docs_vectordb.indexing.store import QdrantStore, collection_name
 from databricks_docs_vectordb.parsing.store import Chunk, ChunkStore
 
 MODEL = ModelInfo("openai", "text-embedding-3-small", None)
@@ -296,3 +298,192 @@ def test_a_normalized_point_reads_back_unchanged_as_float32(
     for p in points:
         assert array.array("f", back[p.id].vector) == array.array("f", p.vector)
         assert back[p.id].payload == p.payload
+
+
+# -- compare (against the sidecar) ------------------------------------------------
+
+PAGES = [f"https://docs.databricks.com/aws/en/p{i}/" for i in range(3)]
+DIMENSIONS = 4
+
+
+def page_rows(url: str, chunks: int = 2, *, seed: int = 0) -> list[StoredVector]:
+    """`chunks` rows for `url`, with vectors that are not unit length."""
+    rng = random.Random(f"{url} {seed}")
+    return [
+        row_of(url, index=i, vector=[rng.gauss(0, 1) for _ in range(DIMENSIONS)])
+        for i in range(chunks)
+    ]
+
+
+ROWS = [row for url in PAGES for row in page_rows(url)]
+
+
+@pytest.fixture
+def prefixed(settings, name):
+    """Settings whose collection prefix is the throwaway `name`, so that
+    `<name>_*` collections stand in for other models'."""
+    return replace(settings, collection_prefix=name)
+
+
+@pytest.fixture
+def qdrant(prefixed):
+    with QdrantStore(prefixed) as s:
+        yield s
+
+
+@pytest.fixture
+def collection(name) -> str:
+    return collection_name(name, MODEL, DIMENSIONS)
+
+
+def load(client, collection: str, rows, *, normalize: bool = True) -> None:
+    points = [to_point(row, normalize=normalize) for row in rows]
+    client.upsert(
+        collection,
+        points=[
+            models.PointStruct(id=p.id, vector=p.vector, payload=p.payload)
+            for p in points
+        ],
+        wait=True,
+    )
+
+
+@pytest.fixture
+def loaded(qdrant, client, collection) -> str:
+    """`collection`, holding the points of every row in `ROWS`."""
+    qdrant.create_collection(collection, dimensions=DIMENSIONS)
+    load(client, collection, ROWS)
+    return collection
+
+
+def changed_vector(row: StoredVector) -> StoredVector:
+    return row._replace(embedding=pack_embedding([1.0, 2.0, 3.0, 4.0]))
+
+
+@pytest.mark.network
+def test_with_no_collection_every_page_is_new(qdrant, collection, prefixed):
+    plan = compare(qdrant, collection, ROWS, set(PAGES), prefixed)
+    assert not plan.exists
+    assert plan.new == set(PAGES)
+    assert plan.current == plan.changed == plan.removed == plan.not_ok == set()
+    assert plan.old_collections == ()
+    assert not plan.replaces_anything
+
+
+@pytest.mark.network
+def test_after_a_load_every_page_is_current(qdrant, loaded, prefixed):
+    plan = compare(qdrant, loaded, ROWS, set(PAGES), prefixed)
+    assert plan.exists
+    assert plan.current == set(PAGES)
+    assert plan.new == plan.changed == plan.removed == set()
+    assert not plan.replaces_anything
+
+
+@pytest.mark.network
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda rows: [changed_vector(r) if r == rows[2] else r for r in rows],
+        lambda rows: [r for r in rows if r != rows[3]],
+        lambda rows: [*rows, *page_rows(PAGES[1], 3)[2:]],
+        lambda rows: [*rows, rows[2]._replace(sub_index=1)],
+    ],
+    ids=["re-embedded", "fewer-chunks", "more-chunks", "split"],
+)
+def test_any_difference_changes_only_that_page(qdrant, loaded, prefixed, edit):
+    """Each edit touches a row of PAGES[1] only."""
+    plan = compare(qdrant, loaded, edit(ROWS), set(PAGES), prefixed)
+    assert plan.changed == {PAGES[1]}
+    assert plan.current == {PAGES[0], PAGES[2]}
+    assert plan.new == plan.removed == set()
+    assert plan.replaces_anything
+
+
+@pytest.mark.network
+def test_a_page_not_ok_in_the_manifest_is_removed_and_not_loaded(
+    qdrant, loaded, prefixed
+):
+    extra = page_rows("https://docs.databricks.com/aws/en/gone/")
+    ok = {PAGES[0], PAGES[2]}
+    plan = compare(qdrant, loaded, [*ROWS, *extra], ok, prefixed)
+    assert plan.removed == {PAGES[1]}
+    assert plan.not_ok == {PAGES[1], extra[0].url}
+    assert plan.current == ok
+    assert plan.new == set()
+
+
+@pytest.mark.network
+def test_a_page_with_points_but_no_rows_is_removed(qdrant, loaded, prefixed):
+    rows = [r for r in ROWS if r.url != PAGES[1]]
+    plan = compare(qdrant, loaded, rows, set(PAGES), prefixed)
+    assert plan.removed == {PAGES[1]}
+    assert plan.current == {PAGES[0], PAGES[2]}
+    assert plan.not_ok == set()
+
+
+@pytest.mark.network
+def test_other_collections_under_the_prefix_are_old(
+    qdrant, client, loaded, name, prefixed
+):
+    for other in (
+        f"{name}_openai_text_embedding_3_large_4",
+        f"{name}_a_b_4",
+        f"{name}x",
+    ):
+        client.create_collection(
+            other,
+            vectors_config=models.VectorParams(size=4, distance=models.Distance.COSINE),
+        )
+    plan = compare(qdrant, loaded, ROWS, set(PAGES), prefixed)
+    assert plan.old_collections == (
+        f"{name}_a_b_4",
+        f"{name}_openai_text_embedding_3_large_4",
+    )
+    assert plan.current == set(PAGES)
+    assert plan.replaces_anything
+
+
+@pytest.mark.network
+def test_refresh_counts_every_page_with_points_as_changed(
+    qdrant, loaded, prefixed, monkeypatch
+):
+    with_vectors = []
+    scroll = QdrantStore.scroll
+
+    def spy(self, *args, **kwargs):
+        with_vectors.append(kwargs["with_vectors"])
+        return scroll(self, *args, **kwargs)
+
+    monkeypatch.setattr(QdrantStore, "scroll", spy)
+    extra = page_rows("https://docs.databricks.com/aws/en/new/")
+    rows = [r for r in ROWS if r.url != PAGES[2]] + extra
+    plan = compare(qdrant, loaded, rows, {*PAGES, extra[0].url}, prefixed, refresh=True)
+    assert plan.refresh
+    assert plan.changed == {PAGES[0], PAGES[1]}
+    assert plan.removed == {PAGES[2]}
+    assert plan.new == {extra[0].url}
+    assert plan.current == set()
+    assert with_vectors and not any(with_vectors)
+
+
+@pytest.mark.network
+def test_compare_reads_every_scroll_page(qdrant, loaded, prefixed, monkeypatch):
+    monkeypatch.setattr(store_module, "SCROLL_LIMIT", 2)
+    plan = compare(qdrant, loaded, ROWS, set(PAGES), prefixed)
+    assert plan.current == set(PAGES)
+
+
+@pytest.mark.network
+def test_vectors_are_compared_under_the_configured_normalization(
+    client, collection, prefixed
+):
+    """Under `Dot`, Qdrant stores vectors as given, so a load without
+    normalization is current only to a compare without it too."""
+    dot = replace(prefixed, distance="Dot", normalize=False)
+    with QdrantStore(dot) as qdrant:
+        qdrant.create_collection(collection, dimensions=DIMENSIONS)
+        load(client, collection, ROWS, normalize=False)
+        assert compare(qdrant, collection, ROWS, set(PAGES), dot).current == set(PAGES)
+        normalized = replace(dot, normalize=True)
+        plan = compare(qdrant, collection, ROWS, set(PAGES), normalized)
+        assert plan.changed == set(PAGES)

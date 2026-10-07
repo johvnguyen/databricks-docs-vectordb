@@ -23,7 +23,10 @@ def client(settings):
 
 @pytest.fixture
 def name(client):
-    """A throwaway collection (Q24), deleted afterwards whatever happens."""
+    """A throwaway collection name (Q24). Every collection whose name starts
+    with it is deleted afterwards, whatever happens."""
     n = f"test_{uuid.uuid4().hex}"
     yield n
-    client.delete_collection(n)
+    for collection in client.get_collections().collections:
+        if collection.name.startswith(n):
+            client.delete_collection(collection.name)

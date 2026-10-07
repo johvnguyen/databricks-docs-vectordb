@@ -1,3 +1,5 @@
+import array
+import uuid
 from dataclasses import replace
 
 import pytest
@@ -7,6 +9,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from databricks_docs_vectordb.embedding.config import Settings as EmbeddingSettings
 from databricks_docs_vectordb.embedding.provider import configured_model_info
 from databricks_docs_vectordb.embedding.store import ModelInfo
+from databricks_docs_vectordb.indexing import store as store_module
 from databricks_docs_vectordb.indexing.store import (
     KEYWORD_INDEXES,
     SPARSE_VECTOR_NAME,
@@ -133,3 +136,51 @@ def test_a_failed_payload_index_leaves_no_collection(store, client, name, monkey
 def test_connect_does_not_warn_about_plain_http(settings, recwarn):
     connect(settings).close()
     assert not [w for w in recwarn if "insecure" in str(w.message)]
+
+
+@pytest.mark.network
+def test_collection_exists_and_collection_names(store, name):
+    assert not store.collection_exists(name)
+    assert name not in store.collection_names()
+    store.create_collection(name, dimensions=2)
+    assert store.collection_exists(name)
+    assert name in store.collection_names()
+
+
+@pytest.mark.network
+def test_scroll_pages_through_every_point(store, client, name, monkeypatch):
+    monkeypatch.setattr(store_module, "SCROLL_LIMIT", 2)
+    store.create_collection(name, dimensions=2)
+    ids = [str(uuid.uuid4()) for _ in range(5)]
+    client.upsert(
+        name,
+        points=[
+            models.PointStruct(id=i, vector=[0.6, 0.8], payload={"url": f"u{n}"})
+            for n, i in enumerate(ids)
+        ],
+        wait=True,
+    )
+    seen, offset, requests = [], None, 0
+    while True:
+        points, offset = store.scroll(name, offset=offset, with_vectors=True)
+        seen += points
+        requests += 1
+        if offset is None:
+            break
+    assert requests == 3
+    assert {p.id for p in seen} == set(ids)
+    assert sorted(p.url for p in seen) == [f"u{n}" for n in range(5)]
+    assert all(array.array("f", p.vector) == array.array("f", [0.6, 0.8]) for p in seen)
+
+
+@pytest.mark.network
+def test_scroll_without_vectors_reads_none(store, client, name):
+    store.create_collection(name, dimensions=2)
+    client.upsert(
+        name,
+        points=[models.PointStruct(id=1, vector=[0.6, 0.8], payload={"url": "u"})],
+        wait=True,
+    )
+    points, offset = store.scroll(name, with_vectors=False)
+    assert [(p.id, p.url, p.vector) for p in points] == [("1", "u", None)]
+    assert offset is None

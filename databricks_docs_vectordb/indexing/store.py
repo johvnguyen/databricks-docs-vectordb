@@ -15,7 +15,7 @@ import math
 import re
 import warnings
 from types import TracebackType
-from typing import Self
+from typing import NamedTuple, Self
 
 from qdrant_client import QdrantClient, models
 
@@ -31,6 +31,9 @@ SPARSE_VECTOR_NAME = "sparse"
 # The page filter and the section filter (Q9). Every field filtered on gets a
 # payload index; `chunk_id` and `sub_index` are lookup keys, not filters.
 KEYWORD_INDEXES = ("url", "section")
+
+# Points per scroll request: what the full scans under "Qdrant, measured" used.
+SCROLL_LIMIT = 1000
 
 
 def collection_name(prefix: str, model: ModelInfo, dimensions: int) -> str:
@@ -48,6 +51,14 @@ def collection_name(prefix: str, model: ModelInfo, dimensions: int) -> str:
         re.sub(r"[^a-z0-9]+", "_", p.lower()) for p in (model.provider, model.model)
     ]
     return "_".join([prefix, *parts, str(dimensions)])
+
+
+class StoredPoint(NamedTuple):
+    """A point as read back: its ID, its page, and its vector if asked for."""
+
+    id: str
+    url: str
+    vector: list[float] | None
 
 
 def connect(settings: Settings) -> QdrantClient:
@@ -127,3 +138,36 @@ class QdrantStore:
             with contextlib.suppress(Exception):
                 self._client.delete_collection(name)
             raise
+
+    def collection_exists(self, name: str) -> bool:
+        return self._client.collection_exists(name)
+
+    def collection_names(self) -> list[str]:
+        """Every collection on the server, this phase's or not."""
+        return [c.name for c in self._client.get_collections().collections]
+
+    def scroll(
+        self, name: str, *, offset: str | None = None, with_vectors: bool
+    ) -> tuple[list[StoredPoint], str | None]:
+        """Up to `SCROLL_LIMIT` points of `name`, from `offset` (the start
+        when None), and the offset of the next request, None after the last.
+
+        One request, so the runner can retry it on its own. Only the `url`
+        payload field is read.
+        """
+        records, next_offset = self._client.scroll(
+            collection_name=name,
+            limit=SCROLL_LIMIT,
+            offset=offset,
+            with_payload=["url"],
+            with_vectors=with_vectors,
+        )
+        points = [
+            StoredPoint(
+                id=str(r.id),
+                url=str((r.payload or {}).get("url", "")),
+                vector=r.vector if with_vectors else None,
+            )
+            for r in records
+        ]
+        return points, None if next_offset is None else str(next_offset)
