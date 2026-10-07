@@ -11,12 +11,15 @@ client's own are not relied on.
 """
 
 import contextlib
+import hashlib
 import math
 import re
 import warnings
+from pathlib import Path
 from types import TracebackType
 from typing import NamedTuple, Self
 
+import httpx
 from qdrant_client import QdrantClient, models
 
 from databricks_docs_vectordb.embedding.store import ModelInfo
@@ -173,6 +176,51 @@ class QdrantStore:
             if index is None or index.data_type != models.PayloadSchemaType.KEYWORD:
                 found.append(f"no keyword index on {field_name!r}")
         return found
+
+    def save_snapshot(self, name: str, directory: Path) -> Path:
+        """Snapshot `name` as it is now, download it into `directory`, and
+        delete the server's copy, since nothing mounts the server's
+        snapshots path (Q29, Q40). Returns the file, named as Qdrant named
+        the snapshot.
+
+        The download goes to a `.partial` file, renamed once its sha256
+        matches the server's checksum, so a `.snapshot` file there is always
+        whole. If anything fails, the server's copy is deleted all the same.
+        """
+        snapshot = self._client.create_snapshot(name, wait=True)
+        if snapshot is None:
+            raise RuntimeError(f"Qdrant returned no snapshot of {name}")
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / snapshot.name
+        partial = path.with_name(f"{path.name}.partial")
+        try:
+            digest = hashlib.sha256()
+            with (
+                httpx.stream(
+                    "GET",
+                    f"{self._settings.url.rstrip('/')}/collections/{name}"
+                    f"/snapshots/{snapshot.name}",
+                    headers={"api-key": self._settings.api_key},
+                    timeout=self._settings.request_timeout,
+                ) as response,
+                partial.open("wb") as file,
+            ):
+                response.raise_for_status()
+                for chunk in response.iter_bytes():
+                    file.write(chunk)
+                    digest.update(chunk)
+            if snapshot.checksum and digest.hexdigest() != snapshot.checksum:
+                raise RuntimeError(
+                    f"the downloaded snapshot of {name} does not match its checksum"
+                )
+            partial.rename(path)
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            with contextlib.suppress(Exception):
+                self._client.delete_snapshot(name, snapshot.name, wait=True)
+            raise
+        self._client.delete_snapshot(name, snapshot.name, wait=True)
+        return path
 
     def collection_exists(self, name: str) -> bool:
         return self._client.collection_exists(name)

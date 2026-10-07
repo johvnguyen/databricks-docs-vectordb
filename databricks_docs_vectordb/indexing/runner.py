@@ -3,17 +3,20 @@
 
 So far this holds the read side (Step 4), shared with `index verify`: the
 orphan check, and the mapping from an embeddings row to the point it
-becomes. Then the loader's first stage (Step 5): comparing the rows with
-what Qdrant holds, to decide what a run is to do before it writes anything.
+becomes. Then the loader's first stages (Step 5): comparing the rows with
+what Qdrant holds, to decide what a run is to do, and the question whether
+to save what it would change, both before it writes anything.
 """
 
 import array
 import hashlib
 import logging
 import math
+import sys
 import uuid
-from collections.abc import Container, Iterable, Iterator, Sequence
+from collections.abc import Callable, Container, Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import NamedTuple
 
 from databricks_docs_vectordb.embedding.store import StoredVector, unpack_embedding
@@ -137,10 +140,17 @@ class Plan:
     old_collections: tuple[str, ...]  # other models' collections, to be deleted
 
     @property
+    def affected_collections(self) -> list[str]:
+        """The collections this run would change or delete: `collection` if
+        it would replace or remove a page, then the old ones."""
+        affected = [self.collection] if self.changed or self.removed else []
+        return affected + list(self.old_collections)
+
+    @property
     def replaces_anything(self) -> bool:
         """Whether this run would replace or remove a page, or delete a
         collection: when the save question is asked (Q29, Q40)."""
-        return bool(self.changed or self.removed or self.old_collections)
+        return bool(self.affected_collections)
 
 
 def compare(
@@ -245,3 +255,82 @@ def _vector_hash(vector: Sequence[float]) -> bytes:
     """A hash of `vector` as float32, the precision Qdrant stores, so a
     vector read back hashes the same as the one written."""
     return hashlib.blake2b(array.array("f", vector).tobytes(), digest_size=16).digest()
+
+
+class SaveQuestionUnanswered(Exception):
+    """The run would replace, remove or delete something, but the save
+    question could not be asked or was not answered."""
+
+
+def should_save(
+    plan: Plan,
+    settings: Settings,
+    save_old: bool | None,
+    *,
+    ask: Callable[[str], str] = input,
+    interactive: bool | None = None,
+) -> bool:
+    """Whether to save the affected collections before writing anything:
+    the save question (Q29, Q40), asked at most once.
+
+    Not asked when nothing would be replaced, removed or deleted (a first
+    load, or a run with nothing to do), nor when `save_old`
+    (`--save-old`/`--no-save-old`) answers it in advance. Otherwise it is
+    asked on the terminal, or, with no terminal (`interactive` defaults to
+    whether stdin is one), `SaveQuestionUnanswered` is raised.
+    """
+    affected = plan.affected_collections
+    if not affected:
+        return False
+    if save_old is not None:
+        return save_old
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+    if not interactive:
+        raise SaveQuestionUnanswered(
+            f"this run would change {', '.join(affected)}, and there is no "
+            "terminal to ask whether to save them first: pass --save-old or "
+            "--no-save-old"
+        )
+    question = (
+        f"This run would {_changes(plan)}.\n"
+        f"Save a snapshot of {', '.join(affected)} to {settings.snapshots_dir}/ "
+        "first? [y/n] "
+    )
+    while True:
+        try:
+            answer = ask(question).strip().lower()
+        except EOFError as e:
+            raise SaveQuestionUnanswered("the save question was not answered") from e
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        question = "Please answer y or n: "
+
+
+def save_affected(qdrant: QdrantStore, plan: Plan, settings: Settings) -> list[Path]:
+    """Save a snapshot of each affected collection to
+    `settings.snapshots_dir`, before the run writes anything."""
+    paths = []
+    for name in plan.affected_collections:
+        path = qdrant.save_snapshot(name, settings.snapshots_dir)
+        logger.info("saved %s to %s (%d MB)", name, path, path.stat().st_size // 10**6)
+        paths.append(path)
+    return paths
+
+
+def _changes(plan: Plan) -> str:
+    """What `plan` would replace, remove or delete, for the save question."""
+    parts = []
+    if plan.refresh and (plan.changed or plan.removed):
+        pages = len(plan.changed) + len(plan.removed)
+        parts.append(f"drop and rebuild {plan.collection}, which holds {pages} page(s)")
+    else:
+        if plan.changed:
+            parts.append(f"replace {len(plan.changed)} page(s) in {plan.collection}")
+        if plan.removed:
+            parts.append(f"remove {len(plan.removed)} page(s) from {plan.collection}")
+    if plan.old_collections:
+        parts.append(f"delete the old collection(s) {', '.join(plan.old_collections)}")
+    return "; ".join(parts)

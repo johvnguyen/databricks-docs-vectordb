@@ -2,6 +2,7 @@ import array
 import uuid
 from dataclasses import replace
 
+import httpx
 import pytest
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -241,3 +242,61 @@ def test_an_extra_payload_index_is_not_a_mismatch(store, client, name):
         name, "source", field_schema=models.PayloadSchemaType.KEYWORD, wait=True
     )
     assert store.settings_mismatches(name, dimensions=4) == []
+
+
+@pytest.fixture
+def ten_points(store, client, name) -> str:
+    store.create_collection(name, dimensions=2)
+    client.upsert(
+        name,
+        points=[
+            models.PointStruct(id=i, vector=[0.6, 0.8], payload={"url": f"u{i}"})
+            for i in range(10)
+        ],
+        wait=True,
+    )
+    return name
+
+
+@pytest.mark.network
+def test_save_snapshot_downloads_a_whole_file_and_leaves_none_on_the_server(
+    store, client, ten_points, tmp_path, restore
+):
+    directory = tmp_path / "qdrant_snapshots"
+    path = store.save_snapshot(ten_points, directory)
+    assert path.parent == directory
+    assert path.name.startswith(ten_points)
+    assert path.suffix == ".snapshot"
+    assert [p.name for p in directory.iterdir()] == [path.name]  # no .partial
+    assert client.list_snapshots(ten_points) == []
+    assert restore(path, f"{ten_points}_restored") == 10
+
+
+@pytest.mark.network
+def test_a_failed_download_keeps_no_file_and_no_server_snapshot(
+    store, client, ten_points, tmp_path, monkeypatch
+):
+    def fail(*args, **kwargs):
+        raise httpx.ConnectError("sidecar went away")
+
+    monkeypatch.setattr(store_module.httpx, "stream", fail)
+    with pytest.raises(httpx.ConnectError):
+        store.save_snapshot(ten_points, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+    assert client.list_snapshots(ten_points) == []
+
+
+@pytest.mark.network
+def test_a_checksum_mismatch_keeps_no_file_and_no_server_snapshot(
+    store, client, ten_points, tmp_path, monkeypatch
+):
+    create = QdrantClient.create_snapshot
+
+    def corrupt(self, *args, **kwargs):
+        return create(self, *args, **kwargs).model_copy(update={"checksum": "0" * 64})
+
+    monkeypatch.setattr(QdrantClient, "create_snapshot", corrupt)
+    with pytest.raises(RuntimeError, match="checksum"):
+        store.save_snapshot(ten_points, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+    assert client.list_snapshots(ten_points) == []

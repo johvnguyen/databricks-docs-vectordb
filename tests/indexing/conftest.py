@@ -1,7 +1,9 @@
 """Fixtures for the tests that run against the Qdrant sidecar (`network`)."""
 
 import uuid
+from pathlib import Path
 
+import httpx
 import pytest
 
 from databricks_docs_vectordb.indexing.config import Settings
@@ -30,3 +32,22 @@ def name(client):
     for collection in client.get_collections().collections:
         if collection.name.startswith(n):
             client.delete_collection(collection.name)
+
+
+@pytest.fixture
+def restore(settings, client):
+    """Upload a saved snapshot into a new collection, the way to restore one,
+    and return that collection's point count."""
+
+    def restore(path: Path, collection: str) -> int:
+        with path.open("rb") as file:
+            httpx.post(
+                f"{settings.url}/collections/{collection}/snapshots/upload",
+                params={"wait": "true"},
+                files={"snapshot": (path.name, file)},
+                headers={"api-key": settings.api_key},
+                timeout=120,
+            ).raise_for_status()
+        return client.count(collection, exact=True).count
+
+    return restore

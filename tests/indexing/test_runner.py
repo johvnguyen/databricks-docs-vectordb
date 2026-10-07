@@ -17,9 +17,14 @@ from databricks_docs_vectordb.embedding.store import (
     unpack_embedding,
 )
 from databricks_docs_vectordb.indexing import store as store_module
+from databricks_docs_vectordb.indexing.config import Settings
 from databricks_docs_vectordb.indexing.runner import (
+    Plan,
+    SaveQuestionUnanswered,
     compare,
     point_id,
+    save_affected,
+    should_save,
     skip_orphans,
     to_point,
     unit_vector,
@@ -533,3 +538,157 @@ def test_vectors_are_compared_under_the_configured_normalization(
             qdrant, collection, ROWS, set(PAGES), normalized, dimensions=DIMENSIONS
         )
         assert plan.changed == set(PAGES)
+
+
+# -- the save question ------------------------------------------------------------
+
+COLLECTION = "databricks_docs_openai_text_embedding_3_small_4"
+OLD = "databricks_docs_openai_text_embedding_3_large_4"
+
+
+def make_plan(**overrides) -> Plan:
+    fields = {
+        "collection": COLLECTION,
+        "exists": True,
+        "refresh": False,
+        "mismatches": (),
+        "current": frozenset(),
+        "new": frozenset(),
+        "changed": frozenset(),
+        "removed": frozenset(),
+        "not_ok": frozenset(),
+        "old_collections": (),
+    }
+    fields.update(overrides)
+    return Plan(**fields)
+
+
+@pytest.fixture
+def index_settings(tmp_path) -> Settings:
+    return Settings(api_key="test-key", data_dir=tmp_path)
+
+
+def never_asked(question: str) -> str:
+    raise AssertionError(f"asked: {question}")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "affected"),
+    [
+        ({"current": frozenset(PAGES), "new": frozenset({"n"})}, []),
+        ({"changed": frozenset({"c"})}, [COLLECTION]),
+        ({"removed": frozenset({"r"})}, [COLLECTION]),
+        ({"old_collections": (OLD,)}, [OLD]),
+        ({"changed": frozenset({"c"}), "old_collections": (OLD,)}, [COLLECTION, OLD]),
+    ],
+    ids=["new-only", "changed", "removed", "old-only", "both"],
+)
+def test_affected_collections(overrides, affected):
+    plan = make_plan(**overrides)
+    assert plan.affected_collections == affected
+    assert plan.replaces_anything == bool(affected)
+
+
+@pytest.mark.parametrize("save_old", [None, True, False])
+def test_nothing_to_replace_asks_nothing(index_settings, save_old):
+    """A first load, or a run with nothing to do."""
+    plan = make_plan(exists=False, new=frozenset(PAGES))
+    assert not should_save(
+        plan, index_settings, save_old, ask=never_asked, interactive=False
+    )
+
+
+@pytest.mark.parametrize("save_old", [True, False])
+def test_the_flags_answer_in_advance(index_settings, save_old):
+    plan = make_plan(changed=frozenset({PAGES[0]}))
+    assert (
+        should_save(plan, index_settings, save_old, ask=never_asked, interactive=False)
+        is save_old
+    )
+
+
+def test_with_no_terminal_and_no_flag_the_run_stops(index_settings):
+    plan = make_plan(changed=frozenset({PAGES[0]}), old_collections=(OLD,))
+    with pytest.raises(SaveQuestionUnanswered, match="--save-old or --no-save-old"):
+        should_save(plan, index_settings, None, ask=never_asked, interactive=False)
+
+
+@pytest.mark.parametrize(
+    ("answer", "save"), [("y", True), ("YES ", True), ("n", False), ("No", False)]
+)
+def test_the_question_is_asked_once_on_a_terminal(index_settings, answer, save):
+    plan = make_plan(
+        changed=frozenset(PAGES[:2]),
+        removed=frozenset({PAGES[2]}),
+        old_collections=(OLD,),
+    )
+    asked = []
+
+    def ask(question: str) -> str:
+        asked.append(question)
+        return answer
+
+    assert should_save(plan, index_settings, None, ask=ask, interactive=True) is save
+    [question] = asked
+    assert f"replace 2 page(s) in {COLLECTION}" in question
+    assert f"remove 1 page(s) from {COLLECTION}" in question
+    assert f"delete the old collection(s) {OLD}" in question
+    assert f"{COLLECTION}, {OLD} to {index_settings.snapshots_dir}/" in question
+
+
+def test_a_rebuild_is_described_as_one(index_settings):
+    plan = make_plan(
+        refresh=True, changed=frozenset(PAGES[:2]), removed=frozenset({PAGES[2]})
+    )
+    asked = []
+    should_save(
+        plan,
+        index_settings,
+        None,
+        ask=lambda q: asked.append(q) or "n",
+        interactive=True,
+    )
+    assert f"drop and rebuild {COLLECTION}, which holds 3 page(s)" in asked[0]
+
+
+def test_any_other_answer_asks_again(index_settings):
+    answers = iter(["", "maybe", "n"])
+    asked = []
+
+    def ask(question: str) -> str:
+        asked.append(question)
+        return next(answers)
+
+    plan = make_plan(changed=frozenset({PAGES[0]}))
+    assert not should_save(plan, index_settings, None, ask=ask, interactive=True)
+    assert asked[1:] == ["Please answer y or n: "] * 2
+
+
+def test_no_answer_stops_the_run(index_settings):
+    def ask(question: str) -> str:
+        raise EOFError
+
+    plan = make_plan(changed=frozenset({PAGES[0]}))
+    with pytest.raises(SaveQuestionUnanswered):
+        should_save(plan, index_settings, None, ask=ask, interactive=True)
+
+
+@pytest.mark.network
+def test_save_affected_snapshots_every_affected_collection(
+    qdrant, client, loaded, name, prefixed, tmp_path, restore
+):
+    old = f"{name}_openai_text_embedding_3_large_4"
+    client.create_collection(
+        old, vectors_config=models.VectorParams(size=4, distance=models.Distance.COSINE)
+    )
+    rows = [r for r in ROWS if r.url != PAGES[1]]
+    plan = compare(qdrant, loaded, rows, set(PAGES), prefixed, dimensions=DIMENSIONS)
+    assert plan.affected_collections == [loaded, old]
+
+    settings = replace(prefixed, data_dir=tmp_path)
+    paths = save_affected(qdrant, plan, settings)
+    assert [p.parent for p in paths] == [settings.snapshots_dir] * 2
+    assert paths[0].name.startswith(loaded) and paths[1].name.startswith(old)
+    assert client.list_snapshots(loaded) == client.list_snapshots(old) == []
+    # The saved copy holds the collection as it was before the run.
+    assert restore(paths[0], f"{name}_restored") == len(ROWS)
