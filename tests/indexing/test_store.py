@@ -1,4 +1,3 @@
-import uuid
 from dataclasses import replace
 
 import pytest
@@ -8,7 +7,6 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from databricks_docs_vectordb.embedding.config import Settings as EmbeddingSettings
 from databricks_docs_vectordb.embedding.provider import configured_model_info
 from databricks_docs_vectordb.embedding.store import ModelInfo
-from databricks_docs_vectordb.indexing.config import Settings
 from databricks_docs_vectordb.indexing.store import (
     KEYWORD_INDEXES,
     SPARSE_VECTOR_NAME,
@@ -57,28 +55,7 @@ def test_nonpositive_dimensions_are_rejected(dimensions):
         collection_name("p", model, dimensions)
 
 
-# -- against the sidecar --------------------------------------------------------
-
-
-@pytest.fixture
-def settings() -> Settings:
-    return Settings.load()
-
-
-@pytest.fixture
-def client(settings):
-    """A client of its own, to read back what QdrantStore wrote."""
-    c = connect(settings)
-    yield c
-    c.close()
-
-
-@pytest.fixture
-def name(client):
-    """A throwaway collection (Q24), deleted afterwards whatever happens."""
-    n = f"test_{uuid.uuid4().hex}"
-    yield n
-    client.delete_collection(n)
+# -- against the sidecar (fixtures in conftest.py) ------------------------------
 
 
 @pytest.fixture
