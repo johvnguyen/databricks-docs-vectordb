@@ -301,6 +301,16 @@ class ChunkStore:
             for row in rows
         ]
 
+    def chunk_ids(self) -> set[str]:
+        """Every chunk's `chunk_id`.
+
+        For Phase 4's orphan check (`indexing/runner.py`): the same chunks
+        `embed verify` walks with `iter_chunks`, but without reading each
+        chunk's text, since only the IDs are needed.
+        """
+        rows = self._conn.execute("SELECT chunk_id FROM chunks")
+        return {row["chunk_id"] for row in rows}
+
     def chunks_needing_token_count(self, model: str) -> list[ChunkText]:
         """`(chunk_id, text)` for every chunk with no `token_count` tagged
         as coming from `model`.

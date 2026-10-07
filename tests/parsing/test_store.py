@@ -294,6 +294,27 @@ def test_all_summaries_after_a_replace_reflects_only_the_current_chunks(store):
     assert len(store.all_summaries()) == 1
 
 
+# -- chunk_ids -----------------------------------------------------------
+
+
+def test_chunk_ids_is_empty_for_an_empty_store(store):
+    assert store.chunk_ids() == set()
+
+
+def test_chunk_ids_covers_every_chunk_iter_chunks_walks(store):
+    store.replace_page_chunks(URL_A, make_page(URL_A, 2), now=T1)
+    store.replace_page_chunks(URL_B, make_page(URL_B, 1), now=T1)
+    ids = store.chunk_ids()
+    assert ids == {f"{URL_A}#0", f"{URL_A}#1", f"{URL_B}#0"}
+    assert ids == {chunk.chunk_id for chunk in store.iter_chunks()}
+
+
+def test_chunk_ids_after_a_replace_reflects_only_the_current_chunks(store):
+    store.replace_page_chunks(URL_A, make_page(URL_A, 3), now=T1)
+    store.replace_page_chunks(URL_A, make_page(URL_A, 1), now=T2)
+    assert store.chunk_ids() == {f"{URL_A}#0"}
+
+
 # -- chunks_needing_token_count / set_token_counts ---------------------------
 
 MODEL_A = "text-embedding-3-small"
