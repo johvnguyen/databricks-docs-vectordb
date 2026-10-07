@@ -3,9 +3,9 @@
 
 So far this holds the read side (Step 4), shared with `index verify`: the
 orphan check, and the mapping from an embeddings row to the point it
-becomes. Then the loader's first stages (Step 5): comparing the rows with
-what Qdrant holds, to decide what a run is to do, and the question whether
-to save what it would change, both before it writes anything.
+becomes. Then the loader (Step 5): comparing the rows with what Qdrant
+holds to decide what a run is to do, the question whether to save what it
+would change, both before anything is written, and then the writes.
 """
 
 import array
@@ -16,12 +16,13 @@ import sys
 import uuid
 from collections.abc import Callable, Container, Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from itertools import batched
 from pathlib import Path
 from typing import NamedTuple
 
 from databricks_docs_vectordb.embedding.store import StoredVector, unpack_embedding
 from databricks_docs_vectordb.indexing.config import Settings
-from databricks_docs_vectordb.indexing.store import QdrantStore
+from databricks_docs_vectordb.indexing.store import Point, QdrantStore
 from databricks_docs_vectordb.parsing.report import section_of
 from databricks_docs_vectordb.scraping.config import SOURCES, Source
 
@@ -29,15 +30,6 @@ logger = logging.getLogger(__name__)
 
 # Every point ID is derived from this, so changing it changes them all (Q7).
 POINT_ID_NAMESPACE = uuid.UUID("2405f98a-c138-459f-b780-53782478d987")
-
-
-class Point(NamedTuple):
-    """One embeddings row as a Qdrant point ("Record and collection
-    schema"): what `index run` writes and what `index verify` expects."""
-
-    id: str
-    vector: list[float]
-    payload: dict[str, str | int]  # chunk_id, sub_index, url, section
 
 
 def skip_orphans(
@@ -127,6 +119,7 @@ class Plan:
     page set holds URLs."""
 
     collection: str
+    dimensions: int  # the rows', and so the collection's vector size
     exists: bool  # whether `collection` is already on the server
     # Drop and recreate `collection`, then load every row: `--refresh`, or
     # `mismatches` found it differs from the configured settings.
@@ -221,6 +214,7 @@ def compare(
     prefix = f"{settings.collection_prefix}_"
     plan = Plan(
         collection=collection,
+        dimensions=dimensions,
         exists=exists,
         refresh=refresh,
         mismatches=tuple(mismatches),
@@ -255,6 +249,65 @@ def _vector_hash(vector: Sequence[float]) -> bytes:
     """A hash of `vector` as float32, the precision Qdrant stores, so a
     vector read back hashes the same as the one written."""
     return hashlib.blake2b(array.array("f", vector).tobytes(), digest_size=16).digest()
+
+
+class Written(NamedTuple):
+    pages_deleted: int  # changed and removed pages whose points were deleted
+    pages_loaded: int  # new and changed pages whose rows were upserted
+    points: int  # points upserted
+
+
+def write(
+    qdrant: QdrantStore,
+    plan: Plan,
+    rows: Iterable[StoredVector],
+    settings: Settings,
+) -> Written:
+    """Carry out `plan`, given the same rows `compare` was given.
+
+    With `plan.refresh`, the collection is dropped and recreated (Step 3)
+    and every row is loaded. Otherwise the collection is created if it is
+    missing, every changed and removed page's points are deleted by `url`,
+    and the new and changed pages' rows are upserted. Current pages are
+    left alone, and old models' collections are not touched here.
+
+    All deletes come before any upsert, and points go in batches of
+    `settings.batch_size` that may span pages, so a run stopped part-way
+    leaves each page current, without points (new next time), or partly
+    loaded (changed next time).
+    """
+    deleted = plan.changed | plan.removed
+    if plan.refresh:
+        if plan.exists:
+            qdrant.delete_collection(plan.collection)
+        qdrant.create_collection(plan.collection, dimensions=plan.dimensions)
+    else:
+        if not plan.exists:
+            qdrant.create_collection(plan.collection, dimensions=plan.dimensions)
+        for urls in batched(sorted(deleted), settings.batch_size):
+            qdrant.delete_pages(plan.collection, urls)
+
+    to_load = plan.new | plan.changed
+    mapped = (
+        to_point(row, normalize=settings.normalize)
+        for row in rows
+        if row.url in to_load
+    )
+    points = 0
+    for batch in batched(mapped, settings.batch_size):
+        qdrant.upsert(plan.collection, batch)
+        before, points = points, points + len(batch)
+        if points // settings.progress_every > before // settings.progress_every:
+            logger.info("upserted %d points", points)
+    written = Written(len(deleted), len(to_load), points)
+    logger.info(
+        "wrote %s: deleted %d pages' points, loaded %d pages (%d points)",
+        plan.collection,
+        written.pages_deleted,
+        written.pages_loaded,
+        written.points,
+    )
+    return written
 
 
 class SaveQuestionUnanswered(Exception):

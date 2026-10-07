@@ -28,6 +28,7 @@ from databricks_docs_vectordb.indexing.runner import (
     skip_orphans,
     to_point,
     unit_vector,
+    write,
 )
 from databricks_docs_vectordb.indexing.store import QdrantStore, collection_name
 from databricks_docs_vectordb.parsing.store import Chunk, ChunkStore
@@ -549,6 +550,7 @@ OLD = "databricks_docs_openai_text_embedding_3_large_4"
 def make_plan(**overrides) -> Plan:
     fields = {
         "collection": COLLECTION,
+        "dimensions": 4,
         "exists": True,
         "refresh": False,
         "mismatches": (),
@@ -692,3 +694,157 @@ def test_save_affected_snapshots_every_affected_collection(
     assert client.list_snapshots(loaded) == client.list_snapshots(old) == []
     # The saved copy holds the collection as it was before the run.
     assert restore(paths[0], f"{name}_restored") == len(ROWS)
+
+
+# -- write (against the sidecar) --------------------------------------------------
+
+WRITES = ("create_collection", "delete_collection", "delete_pages", "upsert")
+
+
+@pytest.fixture
+def calls(monkeypatch):
+    """Every write call on a QdrantStore, as (method, args), in order."""
+    recorded = []
+    for method in WRITES:
+        original = getattr(QdrantStore, method)
+
+        def spy(self, *args, _method=method, _original=original, **kwargs):
+            recorded.append((_method, args))
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(QdrantStore, method, spy)
+    return recorded
+
+
+def upserted_urls(calls) -> set[str]:
+    return {p.payload["url"] for m, args in calls if m == "upsert" for p in args[1]}
+
+
+def run(qdrant, collection, rows, ok, settings, *, refresh=False):
+    """`index run`'s compare then write, with no save question."""
+    plan = compare(
+        qdrant, collection, rows, ok, settings, dimensions=DIMENSIONS, refresh=refresh
+    )
+    return plan, write(qdrant, plan, rows, settings)
+
+
+def assert_current(qdrant, collection, rows, ok, settings):
+    """Loading twice in a row changes nothing: every page is current."""
+    plan = compare(qdrant, collection, rows, ok, settings, dimensions=DIMENSIONS)
+    assert plan.current == {r.url for r in rows if r.url in ok}
+    assert plan.new == plan.changed == plan.removed == set()
+    assert not plan.refresh
+
+
+@pytest.mark.network
+def test_a_first_load_creates_the_collection_and_loads_every_row(
+    qdrant, client, collection, prefixed
+):
+    plan, written = run(qdrant, collection, ROWS, set(PAGES), prefixed)
+    assert written == (0, len(PAGES), len(ROWS))
+    assert qdrant.settings_mismatches(collection, dimensions=DIMENSIONS) == []
+    assert client.count(collection, exact=True).count == len(ROWS)
+    assert_current(qdrant, collection, ROWS, set(PAGES), prefixed)
+
+
+@pytest.mark.network
+def test_a_changed_page_alone_is_replaced_and_leaves_nothing_behind(
+    qdrant, client, loaded, prefixed, calls
+):
+    calls.clear()
+    dropped = ROWS[3]  # PAGES[1] re-parsed into one chunk fewer
+    rows = [r for r in ROWS if r != dropped]
+    plan, written = run(qdrant, loaded, rows, set(PAGES), prefixed)
+    assert written == (1, 1, 1)
+    assert [(m, args[1]) for m, args in calls if m == "delete_pages"] == [
+        ("delete_pages", (PAGES[1],))
+    ]
+    assert upserted_urls(calls) == {PAGES[1]}
+    assert client.retrieve(loaded, [point_id(dropped.chunk_id, 0)]) == []
+    assert client.count(loaded, exact=True).count == len(rows)
+    assert_current(qdrant, loaded, rows, set(PAGES), prefixed)
+
+
+@pytest.mark.network
+def test_a_removed_page_loses_every_point(qdrant, client, loaded, prefixed):
+    ok = {PAGES[0], PAGES[1]}
+    plan, written = run(qdrant, loaded, ROWS, ok, prefixed)
+    assert plan.removed == {PAGES[2]}
+    assert written == (1, 0, 0)
+    gone = models.Filter(
+        must=[models.FieldCondition(key="url", match=models.MatchValue(value=PAGES[2]))]
+    )
+    assert client.count(loaded, count_filter=gone, exact=True).count == 0
+    assert_current(qdrant, loaded, ROWS, ok, prefixed)
+
+
+@pytest.mark.network
+def test_nothing_to_do_writes_nothing(qdrant, loaded, prefixed, calls):
+    calls.clear()
+    plan, written = run(qdrant, loaded, ROWS, set(PAGES), prefixed)
+    assert written == (0, 0, 0)
+    assert calls == []
+
+
+@pytest.mark.network
+def test_refresh_drops_and_recreates_the_collection(qdrant, client, loaded, prefixed):
+    # An extra index, which only the old collection has.
+    client.create_payload_index(
+        loaded, "source", field_schema=models.PayloadSchemaType.KEYWORD, wait=True
+    )
+    plan, written = run(qdrant, loaded, ROWS, set(PAGES), prefixed, refresh=True)
+    assert written == (len(PAGES), len(PAGES), len(ROWS))
+    assert "source" not in client.get_collection(loaded).payload_schema
+    assert client.count(loaded, exact=True).count == len(ROWS)
+    assert_current(qdrant, loaded, ROWS, set(PAGES), prefixed)
+
+
+@pytest.mark.network
+def test_a_settings_mismatch_rebuilds_under_the_new_settings(loaded, prefixed):
+    dot = replace(prefixed, distance="Dot")
+    with QdrantStore(dot) as qdrant:
+        plan, written = run(qdrant, loaded, ROWS, set(PAGES), dot)
+        assert plan.refresh
+        assert qdrant.settings_mismatches(loaded, dimensions=DIMENSIONS) == []
+        assert_current(qdrant, loaded, ROWS, set(PAGES), dot)
+
+
+@pytest.mark.network
+def test_deletes_come_first_and_batches_keep_to_batch_size(
+    qdrant, loaded, prefixed, calls
+):
+    calls.clear()
+    rows = [changed_vector(r) if r.chunk_id.endswith("#0") else r for r in ROWS]
+    small = replace(prefixed, batch_size=2)
+    run(qdrant, loaded, rows, set(PAGES), small)
+    assert [m for m, _ in calls] == ["delete_pages"] * 2 + ["upsert"] * 3
+    assert [len(args[1]) for _, args in calls] == [2, 1, 2, 2, 2]
+
+
+@pytest.mark.network
+def test_a_write_stopped_part_way_finishes_on_the_next_run(
+    qdrant, client, loaded, prefixed, monkeypatch
+):
+    rows = [changed_vector(r) if r.url != PAGES[1] else r for r in ROWS]
+    small = replace(prefixed, batch_size=2)
+    upsert = QdrantStore.upsert
+    upserts = []
+
+    def stop_on_second(self, *args, **kwargs):
+        upserts.append(args)
+        if len(upserts) == 2:
+            raise KeyboardInterrupt
+        return upsert(self, *args, **kwargs)
+
+    monkeypatch.setattr(QdrantStore, "upsert", stop_on_second)
+    with pytest.raises(KeyboardInterrupt):
+        run(qdrant, loaded, rows, set(PAGES), small)
+    monkeypatch.setattr(QdrantStore, "upsert", upsert)
+
+    plan = compare(qdrant, loaded, rows, set(PAGES), small, dimensions=DIMENSIONS)
+    assert plan.current == {PAGES[0], PAGES[1]}
+    assert plan.new == {PAGES[2]}  # deleted, and stopped before its upsert
+    plan, written = run(qdrant, loaded, rows, set(PAGES), small)
+    assert written == (0, 1, 2)
+    assert client.count(loaded, exact=True).count == len(ROWS)
+    assert_current(qdrant, loaded, rows, set(PAGES), small)
