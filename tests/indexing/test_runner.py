@@ -362,8 +362,12 @@ def changed_vector(row: StoredVector) -> StoredVector:
 
 @pytest.mark.network
 def test_with_no_collection_every_page_is_new(qdrant, collection, prefixed):
-    plan = compare(qdrant, collection, ROWS, set(PAGES), prefixed)
+    plan = compare(
+        qdrant, collection, ROWS, set(PAGES), prefixed, dimensions=DIMENSIONS
+    )
     assert not plan.exists
+    assert not plan.refresh
+    assert plan.mismatches == ()
     assert plan.new == set(PAGES)
     assert plan.current == plan.changed == plan.removed == plan.not_ok == set()
     assert plan.old_collections == ()
@@ -372,8 +376,10 @@ def test_with_no_collection_every_page_is_new(qdrant, collection, prefixed):
 
 @pytest.mark.network
 def test_after_a_load_every_page_is_current(qdrant, loaded, prefixed):
-    plan = compare(qdrant, loaded, ROWS, set(PAGES), prefixed)
+    plan = compare(qdrant, loaded, ROWS, set(PAGES), prefixed, dimensions=DIMENSIONS)
     assert plan.exists
+    assert not plan.refresh
+    assert plan.mismatches == ()
     assert plan.current == set(PAGES)
     assert plan.new == plan.changed == plan.removed == set()
     assert not plan.replaces_anything
@@ -392,7 +398,9 @@ def test_after_a_load_every_page_is_current(qdrant, loaded, prefixed):
 )
 def test_any_difference_changes_only_that_page(qdrant, loaded, prefixed, edit):
     """Each edit touches a row of PAGES[1] only."""
-    plan = compare(qdrant, loaded, edit(ROWS), set(PAGES), prefixed)
+    plan = compare(
+        qdrant, loaded, edit(ROWS), set(PAGES), prefixed, dimensions=DIMENSIONS
+    )
     assert plan.changed == {PAGES[1]}
     assert plan.current == {PAGES[0], PAGES[2]}
     assert plan.new == plan.removed == set()
@@ -405,7 +413,7 @@ def test_a_page_not_ok_in_the_manifest_is_removed_and_not_loaded(
 ):
     extra = page_rows("https://docs.databricks.com/aws/en/gone/")
     ok = {PAGES[0], PAGES[2]}
-    plan = compare(qdrant, loaded, [*ROWS, *extra], ok, prefixed)
+    plan = compare(qdrant, loaded, [*ROWS, *extra], ok, prefixed, dimensions=DIMENSIONS)
     assert plan.removed == {PAGES[1]}
     assert plan.not_ok == {PAGES[1], extra[0].url}
     assert plan.current == ok
@@ -415,7 +423,7 @@ def test_a_page_not_ok_in_the_manifest_is_removed_and_not_loaded(
 @pytest.mark.network
 def test_a_page_with_points_but_no_rows_is_removed(qdrant, loaded, prefixed):
     rows = [r for r in ROWS if r.url != PAGES[1]]
-    plan = compare(qdrant, loaded, rows, set(PAGES), prefixed)
+    plan = compare(qdrant, loaded, rows, set(PAGES), prefixed, dimensions=DIMENSIONS)
     assert plan.removed == {PAGES[1]}
     assert plan.current == {PAGES[0], PAGES[2]}
     assert plan.not_ok == set()
@@ -434,7 +442,7 @@ def test_other_collections_under_the_prefix_are_old(
             other,
             vectors_config=models.VectorParams(size=4, distance=models.Distance.COSINE),
         )
-    plan = compare(qdrant, loaded, ROWS, set(PAGES), prefixed)
+    plan = compare(qdrant, loaded, ROWS, set(PAGES), prefixed, dimensions=DIMENSIONS)
     assert plan.old_collections == (
         f"{name}_a_b_4",
         f"{name}_openai_text_embedding_3_large_4",
@@ -457,7 +465,15 @@ def test_refresh_counts_every_page_with_points_as_changed(
     monkeypatch.setattr(QdrantStore, "scroll", spy)
     extra = page_rows("https://docs.databricks.com/aws/en/new/")
     rows = [r for r in ROWS if r.url != PAGES[2]] + extra
-    plan = compare(qdrant, loaded, rows, {*PAGES, extra[0].url}, prefixed, refresh=True)
+    plan = compare(
+        qdrant,
+        loaded,
+        rows,
+        {*PAGES, extra[0].url},
+        prefixed,
+        dimensions=DIMENSIONS,
+        refresh=True,
+    )
     assert plan.refresh
     assert plan.changed == {PAGES[0], PAGES[1]}
     assert plan.removed == {PAGES[2]}
@@ -467,9 +483,35 @@ def test_refresh_counts_every_page_with_points_as_changed(
 
 
 @pytest.mark.network
+def test_a_changed_distance_rebuilds_the_collection(
+    loaded, prefixed, warnings_logged, monkeypatch
+):
+    with_vectors = []
+    scroll = QdrantStore.scroll
+
+    def spy(self, *args, **kwargs):
+        with_vectors.append(kwargs["with_vectors"])
+        return scroll(self, *args, **kwargs)
+
+    monkeypatch.setattr(QdrantStore, "scroll", spy)
+    dot = replace(prefixed, distance="Dot")
+    with QdrantStore(dot) as qdrant:
+        plan = compare(qdrant, loaded, ROWS, set(PAGES), dot, dimensions=DIMENSIONS)
+    assert plan.refresh
+    assert plan.mismatches == ("distance is Cosine, configured Dot",)
+    assert plan.changed == set(PAGES)
+    assert plan.current == set()
+    assert plan.replaces_anything
+    assert not any(with_vectors)
+    [record] = warnings_logged.records
+    assert loaded in record.getMessage()
+    assert "distance is Cosine, configured Dot" in record.getMessage()
+
+
+@pytest.mark.network
 def test_compare_reads_every_scroll_page(qdrant, loaded, prefixed, monkeypatch):
     monkeypatch.setattr(store_module, "SCROLL_LIMIT", 2)
-    plan = compare(qdrant, loaded, ROWS, set(PAGES), prefixed)
+    plan = compare(qdrant, loaded, ROWS, set(PAGES), prefixed, dimensions=DIMENSIONS)
     assert plan.current == set(PAGES)
 
 
@@ -483,7 +525,11 @@ def test_vectors_are_compared_under_the_configured_normalization(
     with QdrantStore(dot) as qdrant:
         qdrant.create_collection(collection, dimensions=DIMENSIONS)
         load(client, collection, ROWS, normalize=False)
-        assert compare(qdrant, collection, ROWS, set(PAGES), dot).current == set(PAGES)
+        assert compare(
+            qdrant, collection, ROWS, set(PAGES), dot, dimensions=DIMENSIONS
+        ).current == set(PAGES)
         normalized = replace(dot, normalize=True)
-        plan = compare(qdrant, collection, ROWS, set(PAGES), normalized)
+        plan = compare(
+            qdrant, collection, ROWS, set(PAGES), normalized, dimensions=DIMENSIONS
+        )
         assert plan.changed == set(PAGES)

@@ -139,6 +139,41 @@ class QdrantStore:
                 self._client.delete_collection(name)
             raise
 
+    def settings_mismatches(self, name: str, *, dimensions: int) -> list[str]:
+        """How `name` differs from what `create_collection` would make of it
+        now, one phrase per difference; empty if it matches.
+
+        Only what `create_collection` sets is checked, and an extra payload
+        index is not a difference: fields can be indexed later (Q9).
+        """
+        info = self._client.get_collection(name)
+        found = []
+        vectors = info.config.params.vectors
+        if not isinstance(vectors, models.VectorParams):
+            found.append("its dense vectors are named, not one unnamed vector")
+        else:
+            if vectors.size != dimensions:
+                found.append(f"vector size is {vectors.size}, rows have {dimensions}")
+            if vectors.distance != models.Distance(self._settings.distance):
+                found.append(
+                    f"distance is {vectors.distance.value}, "
+                    f"configured {self._settings.distance}"
+                )
+        quantization = info.config.quantization_config
+        if not (
+            isinstance(quantization, models.ScalarQuantization)
+            and quantization.scalar.type == models.ScalarType.INT8
+            and quantization.scalar.always_ram
+        ):
+            found.append("quantization is not scalar int8 with always_ram")
+        if SPARSE_VECTOR_NAME not in (info.config.params.sparse_vectors or {}):
+            found.append(f"no sparse vector named {SPARSE_VECTOR_NAME!r}")
+        for field_name in KEYWORD_INDEXES:
+            index = info.payload_schema.get(field_name)
+            if index is None or index.data_type != models.PayloadSchemaType.KEYWORD:
+                found.append(f"no keyword index on {field_name!r}")
+        return found
+
     def collection_exists(self, name: str) -> bool:
         return self._client.collection_exists(name)
 

@@ -184,3 +184,60 @@ def test_scroll_without_vectors_reads_none(store, client, name):
     points, offset = store.scroll(name, with_vectors=False)
     assert [(p.id, p.url, p.vector) for p in points] == [("1", "u", None)]
     assert offset is None
+
+
+@pytest.mark.network
+@pytest.mark.parametrize("distance", ["Cosine", "Dot"])
+def test_a_collection_create_collection_made_has_no_mismatches(
+    settings, name, distance
+):
+    with QdrantStore(replace(settings, distance=distance)) as store:
+        store.create_collection(name, dimensions=4)
+        assert store.settings_mismatches(name, dimensions=4) == []
+
+
+@pytest.mark.network
+def test_a_different_size_or_distance_is_a_mismatch(store, settings, name):
+    store.create_collection(name, dimensions=4)
+    with QdrantStore(replace(settings, distance="Dot")) as dot:
+        assert dot.settings_mismatches(name, dimensions=8) == [
+            "vector size is 4, rows have 8",
+            "distance is Cosine, configured Dot",
+        ]
+
+
+@pytest.mark.network
+def test_a_collection_made_some_other_way_mismatches(store, client, name):
+    client.create_collection(
+        name,
+        vectors_config=models.VectorParams(size=4, distance=models.Distance.COSINE),
+    )
+    assert store.settings_mismatches(name, dimensions=4) == [
+        "quantization is not scalar int8 with always_ram",
+        f"no sparse vector named {SPARSE_VECTOR_NAME!r}",
+        "no keyword index on 'url'",
+        "no keyword index on 'section'",
+    ]
+
+
+@pytest.mark.network
+def test_named_dense_vectors_are_a_mismatch(store, client, name):
+    client.create_collection(
+        name,
+        vectors_config={
+            "dense": models.VectorParams(size=4, distance=models.Distance.COSINE)
+        },
+    )
+    assert store.settings_mismatches(name, dimensions=4)[0] == (
+        "its dense vectors are named, not one unnamed vector"
+    )
+
+
+@pytest.mark.network
+def test_an_extra_payload_index_is_not_a_mismatch(store, client, name):
+    """Fields can be added and indexed later without a reload (Q9)."""
+    store.create_collection(name, dimensions=4)
+    client.create_payload_index(
+        name, "source", field_schema=models.PayloadSchemaType.KEYWORD, wait=True
+    )
+    assert store.settings_mismatches(name, dimensions=4) == []

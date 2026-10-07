@@ -125,7 +125,10 @@ class Plan:
 
     collection: str
     exists: bool  # whether `collection` is already on the server
+    # Drop and recreate `collection`, then load every row: `--refresh`, or
+    # `mismatches` found it differs from the configured settings.
     refresh: bool
+    mismatches: tuple[str, ...]  # how `collection` differs, from settings_mismatches
     current: frozenset[str]  # points already match the rows: left alone
     new: frozenset[str]  # rows and no points: loaded
     changed: frozenset[str]  # points deleted, then the rows loaded
@@ -147,6 +150,7 @@ def compare(
     ok_pages: Container[str],
     settings: Settings,
     *,
+    dimensions: int,
     refresh: bool = False,
 ) -> Plan:
     """Compare `rows`, the configured model's current rows (after
@@ -160,11 +164,25 @@ def compare(
     previous model's (Q37). With `refresh`, every page with points counts
     as changed, so no vectors are read back.
 
+    An existing `collection` whose settings differ from what
+    `create_collection` would make of it now (the distance was changed in
+    config, say) is rebuilt as with `refresh`. `dimensions` is the rows'.
+
     Only a hash of each vector is kept, not the vector, and only pages that
     have points are mapped.
     """
     stored: dict[str, dict[str, bytes | None]] = {}  # url -> point ID -> hash
     exists = qdrant.collection_exists(collection)
+    mismatches = (
+        qdrant.settings_mismatches(collection, dimensions=dimensions) if exists else []
+    )
+    if mismatches:
+        logger.warning(
+            "%s does not match the settings (%s): rebuilding it, as with --refresh",
+            collection,
+            "; ".join(mismatches),
+        )
+    refresh = refresh or bool(mismatches)
     offset = None
     while exists:
         points, offset = qdrant.scroll(
@@ -195,6 +213,7 @@ def compare(
         collection=collection,
         exists=exists,
         refresh=refresh,
+        mismatches=tuple(mismatches),
         current=frozenset(both - changed),
         new=frozenset(expected.keys() - stored.keys()),
         changed=frozenset(changed),
