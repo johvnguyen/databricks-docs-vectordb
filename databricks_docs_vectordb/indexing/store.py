@@ -68,10 +68,12 @@ class Point(NamedTuple):
 
 
 class StoredPoint(NamedTuple):
-    """A point as read back: its ID, its page, and its vector if asked for."""
+    """A point as read back: its ID, its page and section, and its vector if
+    asked for."""
 
     id: str
     url: str
+    section: str
     vector: list[float] | None
 
 
@@ -278,6 +280,10 @@ class QdrantStore:
     def collection_exists(self, name: str) -> bool:
         return self._client.collection_exists(name)
 
+    def count(self, name: str) -> int:
+        """How many points `name` holds, counted exactly."""
+        return self._client.count(name, exact=True).count
+
     def collection_names(self) -> list[str]:
         """Every collection on the server, this phase's or not."""
         return [c.name for c in self._client.get_collections().collections]
@@ -289,19 +295,20 @@ class QdrantStore:
         when None), and the offset of the next request, None after the last.
 
         One request, so the runner can retry it on its own. Only the `url`
-        payload field is read.
+        and `section` payload fields are read.
         """
         records, next_offset = self._client.scroll(
             collection_name=name,
             limit=SCROLL_LIMIT,
             offset=offset,
-            with_payload=["url"],
+            with_payload=["url", "section"],
             with_vectors=with_vectors,
         )
         points = [
             StoredPoint(
                 id=str(r.id),
                 url=str((r.payload or {}).get("url", "")),
+                section=str((r.payload or {}).get("section", "")),
                 vector=r.vector if with_vectors else None,
             )
             for r in records

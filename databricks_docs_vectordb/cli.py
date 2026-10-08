@@ -11,18 +11,24 @@ from pathlib import Path
 import httpx
 import litellm
 from dotenv import find_dotenv, load_dotenv
+from qdrant_client.http.exceptions import ApiException, ResponseHandlingException
 
 from databricks_docs_vectordb.embedding.config import Settings as EmbeddingSettings
 from databricks_docs_vectordb.embedding.provider import configured_model_info
 from databricks_docs_vectordb.embedding.runner import Runner as EmbeddingRunner
 from databricks_docs_vectordb.embedding.runner import RunSummary as EmbeddingSummary
 from databricks_docs_vectordb.embedding.runner import select_candidates
-from databricks_docs_vectordb.embedding.store import EmbeddingsStore
+from databricks_docs_vectordb.embedding.store import EmbeddingsStore, ModelInfo
 from databricks_docs_vectordb.embedding.tokens import backfill_token_counts
 from databricks_docs_vectordb.embedding.verify import (
     format_report as format_embed_verify,
 )
 from databricks_docs_vectordb.embedding.verify import verify_embeddings
+from databricks_docs_vectordb.indexing.config import Settings as IndexingSettings
+from databricks_docs_vectordb.indexing.runner import RunFailed, configured_dimensions
+from databricks_docs_vectordb.indexing.runner import Runner as IndexRunner
+from databricks_docs_vectordb.indexing.runner import RunSummary as IndexSummary
+from databricks_docs_vectordb.indexing.store import QdrantStore, collection_name
 from databricks_docs_vectordb.parsing.config import Settings as ParsingSettings
 from databricks_docs_vectordb.parsing.pipeline import is_current, parse_pages
 from databricks_docs_vectordb.parsing.report import (
@@ -345,6 +351,58 @@ def build_parser() -> argparse.ArgumentParser:
         "under old text, or under a different model are violations "
         "(failed/rejected ones are not)",
     )
+
+    index = commands.add_parser(
+        "index", help="load the embeddings into the Qdrant vector database"
+    )
+    index_sub = index.add_subparsers(dest="index_command", required=True)
+
+    index_run = index_sub.add_parser(
+        "run",
+        help="load the configured model's embeddings into Qdrant, page by page",
+        description=(
+            "Compare the configured model's embeddings with its Qdrant "
+            "collection and bring the collection up to date: load new pages, "
+            "replace changed ones, and remove pages that are gone or not ok "
+            "in the manifest. Pages that are current are left alone, so a "
+            "second run does nothing. Before replacing or removing anything, "
+            "asks once whether to save a snapshot to data/qdrant_snapshots/ "
+            "first; with no terminal, one of --save-old and --no-save-old is "
+            "needed. Needs QDRANT_API_KEY. Safe to interrupt with Ctrl-C and "
+            "to run again: the next run finishes what this one started."
+        ),
+    )
+    index_run.add_argument(
+        "--refresh",
+        action="store_true",
+        help="drop the collection and load every row again",
+    )
+    save = index_run.add_mutually_exclusive_group()
+    save.add_argument(
+        "--save-old",
+        dest="save_old",
+        action="store_const",
+        const=True,
+        help="answer the save question with yes, without asking",
+    )
+    save.add_argument(
+        "--no-save-old",
+        dest="save_old",
+        action="store_const",
+        const=False,
+        help="answer the save question with no, without asking",
+    )
+
+    index_status = index_sub.add_parser(
+        "status",
+        help="show the collection, its point and page counts, and other "
+        "models' collections",
+    )
+    index_status.add_argument(
+        "--by-section",
+        action="store_true",
+        help="also break the counts down by source/section",
+    )
     return parser
 
 
@@ -358,6 +416,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return main_parse(args)
             case "embed":
                 return main_embed(args)
+            case "index":
+                return main_index(args)
     except (RuntimeError, ValueError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -417,6 +477,18 @@ def main_embed(args: argparse.Namespace) -> int:
             return run_embed_status(settings)
         case "verify":
             return run_embed_verify(settings, args)
+    return 2
+
+
+def main_index(args: argparse.Namespace) -> int:
+    # Every index command talks to Qdrant, so QDRANT_API_KEY is required.
+    settings = IndexingSettings.load()
+    model = configured_model_info(EmbeddingSettings.load().model)
+    match args.index_command:
+        case "run":
+            return run_index_run(settings, model, args)
+        case "status":
+            return run_index_status(settings, model, args)
     return 2
 
 
@@ -901,6 +973,164 @@ def run_embed_verify(settings: EmbeddingSettings, args: argparse.Namespace) -> i
             report = verify_embeddings(chunks, None, model, complete=args.complete)
     print(format_embed_verify(report, str(settings.embeddings_path)))
     return 0 if report.ok else 1
+
+
+# -- index -------------------------------------------------------------------
+
+
+def require_embedded(settings: IndexingSettings) -> None:
+    for path, command in (
+        (settings.embeddings_path, "embed run"),
+        (settings.parsed_path, "parse run"),
+        (settings.manifest_path, "scrape enumerate"),
+    ):
+        if not path.exists():
+            raise CliError(f"no {path.name} at {path}; run `{PROG} {command}` first")
+
+
+def run_index_run(
+    settings: IndexingSettings, model: ModelInfo, args: argparse.Namespace
+) -> int:
+    require_embedded(settings)
+    with (
+        run_logging(settings.logs_dir, "index") as log_path,
+        EmbeddingsStore(settings.embeddings_path) as embeddings,
+        ChunkStore(settings.parsed_path) as chunks,
+        Manifest(settings.manifest_path) as manifest,
+        QdrantStore(settings) as qdrant,
+    ):
+        runner = IndexRunner(settings, model, embeddings, chunks, manifest, qdrant)
+        summary = runner.run(refresh=args.refresh, save_old=args.save_old)
+
+    if summary.collection:
+        print(f"collection: {summary.collection} at {settings.url}")
+    if summary.plan is not None:
+        plan = summary.plan
+        upserted = (
+            f"{summary.written.points} point(s) upserted"
+            if summary.written is not None
+            else "write not finished"
+        )
+        print(
+            f"this run: {upserted}; pages: {len(plan.new)} new, "
+            f"{len(plan.changed)} changed, {len(plan.removed)} removed, "
+            f"{len(plan.current)} current"
+        )
+    for path in summary.saved:
+        print(f"saved: {path}")
+    for line in index_follow_up(summary):
+        print(line)
+    print(f"log: {log_path}")
+    return summary.exit_code
+
+
+def index_follow_up(summary: IndexSummary) -> list[str]:
+    """What to do next, given how the run ended."""
+    lines = []
+    if summary.status == "interrupted":
+        lines.append(
+            "interrupted: run the same command again to finish; every page is "
+            "either current or replaced by the next run"
+        )
+    elif summary.status == "failed":
+        lines.append(f"failed: {summary.error}")
+    plan = summary.plan
+    if plan is not None and plan.not_ok:
+        lines.append(
+            f"{len(plan.not_ok)} page(s) with embeddings left out: not ok in the "
+            f"manifest (`{PROG} scrape status` shows why)"
+        )
+    if plan is not None and plan.old_collections:
+        lines.append(
+            f"other models' collection(s) left in place: "
+            f"{', '.join(plan.old_collections)}"
+        )
+    if summary.orphans:
+        lines.append(
+            f"{len(summary.orphans)} orphaned row(s) skipped, their chunk gone "
+            f"from parsed.sqlite: `{PROG} embed verify` lists them"
+        )
+    return lines
+
+
+def run_index_status(
+    settings: IndexingSettings, model: ModelInfo, args: argparse.Namespace
+) -> int:
+    if not settings.embeddings_path.exists():
+        print(
+            f"no embeddings yet at {settings.embeddings_path}; run `{PROG} embed run`"
+        )
+        return 0
+    with EmbeddingsStore(settings.embeddings_path) as embeddings:
+        try:
+            dimensions = configured_dimensions(embeddings, model)
+        except RunFailed as e:
+            raise CliError(str(e)) from e
+    name = collection_name(settings.collection_prefix, model, dimensions)
+    # One attempt, no retries: a status should answer at once.
+    try:
+        with QdrantStore(settings) as qdrant:
+            lines = index_status_lines(
+                qdrant, settings, name, dimensions, by_section=args.by_section
+            )
+    except (ApiException, httpx.HTTPError) as e:
+        cause = e.source if isinstance(e, ResponseHandlingException) else e
+        raise CliError(
+            f"Qdrant at {settings.url}: {type(cause).__name__}: {cause}"
+        ) from e
+    print("\n".join(lines))
+    return 0
+
+
+def index_status_lines(
+    qdrant: QdrantStore,
+    settings: IndexingSettings,
+    name: str,
+    dimensions: int,
+    *,
+    by_section: bool,
+) -> list[str]:
+    lines = [f"collection: {name} at {settings.url}"]
+    names = qdrant.collection_names()
+    if name not in names:
+        lines.append(f"not created yet; run `{PROG} index run`")
+    else:
+        points: dict[str, int] = {}  # section -> its points
+        pages: dict[str, set[str]] = {}  # section -> its pages
+        offset = None
+        while True:
+            batch, offset = qdrant.scroll(name, offset=offset, with_vectors=False)
+            for point in batch:
+                points[point.section] = points.get(point.section, 0) + 1
+                pages.setdefault(point.section, set()).add(point.url)
+            if offset is None:
+                break
+        total_points = sum(points.values())
+        total_pages = len(set().union(*pages.values()))
+        lines.append(f"{total_points} point(s) across {total_pages} page(s)")
+        for mismatch in qdrant.settings_mismatches(name, dimensions=dimensions):
+            lines.append(
+                f"differs from the settings: {mismatch} (the next run rebuilds it)"
+            )
+        if by_section and points:
+            width = max(len("source/section"), *map(len, points))
+            lines.append("per-section (pages, points):")
+            lines.append(f"  {'source/section':<{width}}{'pages':>10}{'points':>10}")
+            for section in sorted(points):
+                lines.append(
+                    f"  {section:<{width}}{len(pages[section]):>10}"
+                    f"{points[section]:>10}"
+                )
+            lines.append("  " + "-" * (width + 20))
+            lines.append(f"  {'total':<{width}}{total_pages:>10}{total_points:>10}")
+    prefix = f"{settings.collection_prefix}_"
+    others = sorted(n for n in names if n.startswith(prefix) and n != name)
+    if others:
+        lines.append("other models' collections:")
+        lines.extend(f"  {other}: {qdrant.count(other)} point(s)" for other in others)
+    else:
+        lines.append("other models' collections: none")
+    return lines
 
 
 if __name__ == "__main__":

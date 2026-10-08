@@ -568,7 +568,7 @@ class Runner:
         error: str | None = None
         previous = _raise_on_sigterm() if handle_signals else None
         try:
-            dimensions = self._dimensions()
+            dimensions = configured_dimensions(self._embeddings, self._model)
             collection = collection_name(
                 self._settings.collection_prefix, self._model, dimensions
             )
@@ -635,29 +635,28 @@ class Runner:
     def _rows(self) -> Iterator[StoredVector]:
         return self._embeddings.ok_vectors(self._model)
 
-    def _dimensions(self) -> int:
-        """The vector size of the configured model's `ok` rows, which names
-        the collection. Raises `RunFailed` if there are none, or if they
-        disagree."""
-        found = {
-            key.dimensions: counts.ok
-            for key, counts in self._embeddings.counts_by_model().items()
-            if (key.provider, key.model, key.model_version) == tuple(self._model)
-            and counts.ok
-        }
-        name = f"{self._model.provider}/{self._model.model}"
-        if not found:
-            raise RunFailed(
-                f"embeddings.sqlite has no ok rows of {name}: run `embed run` first"
-            )
-        if len(found) > 1:
-            raise RunFailed(
-                f"the {name} rows disagree on dimensions: "
-                + ", ".join(f"{n} rows at {d}" for d, n in sorted(found.items()))
-            )
-        [dimensions] = found
-        assert dimensions is not None  # an ok row always has its dimensions
-        return dimensions
+
+def configured_dimensions(embeddings: EmbeddingsStore, model: ModelInfo) -> int:
+    """The vector size of `model`'s `ok` rows, which names its collection.
+    Raises `RunFailed` if there are none, or if they disagree."""
+    found = {
+        key.dimensions: counts.ok
+        for key, counts in embeddings.counts_by_model().items()
+        if (key.provider, key.model, key.model_version) == tuple(model) and counts.ok
+    }
+    name = f"{model.provider}/{model.model}"
+    if not found:
+        raise RunFailed(
+            f"embeddings.sqlite has no ok rows of {name}: run `embed run` first"
+        )
+    if len(found) > 1:
+        raise RunFailed(
+            f"the {name} rows disagree on dimensions: "
+            + ", ".join(f"{n} rows at {d}" for d, n in sorted(found.items()))
+        )
+    [dimensions] = found
+    assert dimensions is not None  # an ok row always has its dimensions
+    return dimensions
 
 
 def _raise_on_sigterm() -> Any:
