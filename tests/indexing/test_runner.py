@@ -1,12 +1,18 @@
 import array
 import logging
 import math
+import os
 import random
 import re
+import signal
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 
+import httpx
 import pytest
 from qdrant_client import models
+from qdrant_client.http.exceptions import ResponseHandlingException
 
 from databricks_docs_vectordb.embedding.store import (
     EmbeddingRow,
@@ -19,7 +25,11 @@ from databricks_docs_vectordb.embedding.store import (
 from databricks_docs_vectordb.indexing import store as store_module
 from databricks_docs_vectordb.indexing.config import Settings
 from databricks_docs_vectordb.indexing.runner import (
+    EXIT_CODES,
     Plan,
+    QdrantUnreachable,
+    RetryingStore,
+    Runner,
     SaveQuestionUnanswered,
     compare,
     point_id,
@@ -32,6 +42,7 @@ from databricks_docs_vectordb.indexing.runner import (
 )
 from databricks_docs_vectordb.indexing.store import QdrantStore, collection_name
 from databricks_docs_vectordb.parsing.store import Chunk, ChunkStore
+from databricks_docs_vectordb.scraping.manifest import Manifest
 
 MODEL = ModelInfo("openai", "text-embedding-3-small", None)
 PAGE = "https://docs.databricks.com/aws/en/delta/"
@@ -848,3 +859,335 @@ def test_a_write_stopped_part_way_finishes_on_the_next_run(
     assert written == (0, 1, 2)
     assert client.count(loaded, exact=True).count == len(ROWS)
     assert_current(qdrant, loaded, rows, set(PAGES), small)
+
+
+# -- RetryingStore ----------------------------------------------------------------
+
+
+class FlakyStore:
+    """`scroll` fails `failures` times with `error`, then answers."""
+
+    def __init__(self, failures: int, error: Exception) -> None:
+        self.failures = failures
+        self.error = error
+        self.calls = 0
+
+    def scroll(self, *args, **kwargs) -> str:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.error
+        return "answered"
+
+
+@pytest.fixture
+def logged(caplog):
+    caplog.set_level(logging.INFO, logger="databricks_docs_vectordb.indexing")
+    return caplog
+
+
+def retrying(store, *, attempts: int = 10, unit: float = 1.0):
+    """A RetryingStore that records its sleeps instead of sleeping. A `unit`
+    of 1.0 makes every delay the nominal one."""
+    sleeps: list[float] = []
+    settings = Settings(api_key="test-key", max_attempts=attempts)
+    return RetryingStore(store, settings, sleep=sleeps.append, rng=lambda: unit), sleeps
+
+
+REFUSED = ResponseHandlingException(
+    httpx.ConnectError("[Errno 111] Connection refused")
+)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        REFUSED,
+        ResponseHandlingException(httpx.ConnectTimeout("timed out")),
+        httpx.ReadTimeout("timed out"),
+        httpx.RemoteProtocolError("Server disconnected"),
+    ],
+    ids=["refused", "connect-timeout", "read-timeout", "disconnected"],
+)
+def test_connection_errors_and_timeouts_are_retried(error, logged):
+    store = FlakyStore(3, error)
+    qdrant, sleeps = retrying(store)
+    assert qdrant.scroll("c", with_vectors=False) == "answered"
+    assert store.calls == 4
+    assert sleeps == [1.0, 2.0, 4.0]
+    assert qdrant.retries == 3
+    messages = [r.getMessage() for r in logged.records]
+    assert len(messages) == 3
+    assert all(m.startswith("qdrant scroll: ") for m in messages)
+    assert "(attempt 3/10)" in messages[2]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("a bug"), ResponseHandlingException(ValueError("bad response"))],
+    ids=["other", "wrapped-other"],
+)
+def test_other_errors_are_raised_at_once(error):
+    store = FlakyStore(1, error)
+    qdrant, sleeps = retrying(store)
+    with pytest.raises(type(error)):
+        qdrant.scroll("c", with_vectors=False)
+    assert store.calls == 1
+    assert sleeps == []
+
+
+def test_after_the_last_attempt_it_gives_up_having_logged_every_one(logged):
+    store = FlakyStore(99, REFUSED)
+    qdrant, sleeps = retrying(store)
+    with pytest.raises(QdrantUnreachable, match="in 10 attempts"):
+        qdrant.scroll("c", with_vectors=False)
+    assert store.calls == 10
+    assert len(sleeps) == 9
+    attempts = [r for r in logged.records if "attempt" in r.getMessage()]
+    assert [f"(attempt {n}/10)" in r.getMessage() for n, r in enumerate(attempts, 1)]
+    assert len(attempts) == 10
+    assert attempts[-1].levelno == logging.ERROR
+
+
+@pytest.mark.parametrize(
+    ("unit", "expected"),
+    [
+        (1.0, [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0, 60.0]),
+        (0.0, [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0]),
+    ],
+    ids=["most", "least"],
+)
+def test_backoff_doubles_up_to_the_cap_with_jitter(unit, expected):
+    qdrant, sleeps = retrying(FlakyStore(99, REFUSED), unit=unit)
+    with pytest.raises(QdrantUnreachable):
+        qdrant.scroll("c", with_vectors=False)
+    assert sleeps == expected
+
+
+# -- Runner -----------------------------------------------------------------------
+
+
+def chunk_for(row: StoredVector) -> Chunk:
+    index = int(row.chunk_id.rsplit("#", 1)[1])
+    return replace(make_chunk(index), chunk_id=row.chunk_id, url=row.url)
+
+
+def embedding_row_for(row: StoredVector) -> EmbeddingRow:
+    index = int(row.chunk_id.rsplit("#", 1)[1])
+    return replace(
+        make_row(index),
+        chunk_id=row.chunk_id,
+        url=row.url,
+        dimensions=row.dimensions,
+        embedding=row.embedding,
+    )
+
+
+@contextmanager
+def open_stores(settings: Settings) -> Iterator[tuple]:
+    with (
+        EmbeddingsStore(settings.embeddings_path) as embeddings,
+        ChunkStore(settings.parsed_path) as chunks,
+        Manifest(settings.manifest_path) as manifest,
+    ):
+        yield embeddings, chunks, manifest
+
+
+def fill(settings: Settings, rows=ROWS, *, orphans=()) -> None:
+    """Every row in embeddings.sqlite, its chunk in parsed.sqlite (but not
+    the `orphans`' chunks), and every page `ok` in the manifest."""
+    with open_stores(settings) as (embeddings, chunks, manifest):
+        for row in [*rows, *orphans]:
+            embeddings.upsert(row.chunk_id, [embedding_row_for(row)])
+        pages = sorted({row.url for row in rows})
+        for url in pages:
+            chunks.replace_page_chunks(
+                url, [chunk_for(row) for row in rows if row.url == url]
+            )
+        manifest.add_pending("aws-en", pages)
+        for url in pages:
+            manifest.record_ok(url, http_status=200, sha256="ab" * 32, size_bytes=1)
+
+
+@pytest.fixture
+def run_settings(prefixed, tmp_path) -> Settings:
+    """The throwaway prefix, with the stores (and snapshots) in tmp_path."""
+    return replace(prefixed, data_dir=tmp_path)
+
+
+def index_run(settings: Settings, qdrant=None, **run):
+    """One `index run`, with no terminal, no real sleeps, and stores opened
+    for it alone."""
+    with open_stores(settings) as (embeddings, chunks, manifest):
+        with qdrant or QdrantStore(settings) as store:
+            runner = Runner(
+                settings,
+                MODEL,
+                embeddings,
+                chunks,
+                manifest,
+                store,
+                sleep=lambda seconds: None,
+                interactive=False,
+            )
+            return runner.run(**run)
+
+
+@pytest.mark.network
+def test_a_run_loads_every_row_and_a_second_changes_nothing(
+    run_settings, collection, client, logged
+):
+    fill(run_settings)
+    first = index_run(run_settings)
+    assert (first.status, first.exit_code) == ("completed", 0)
+    assert first.collection == collection
+    assert first.written == (0, len(PAGES), len(ROWS))
+    assert first.retries == 0
+    second = index_run(run_settings)
+    assert second.status == "completed"
+    assert second.plan.current == set(PAGES)
+    assert second.written == (0, 0, 0)
+    assert client.count(collection, exact=True).count == len(ROWS)
+    summaries = [r for r in logged.records if r.getMessage().startswith("completed in")]
+    assert len(summaries) == 2
+    assert f"{len(ROWS)} points upserted" in summaries[0].getMessage()
+
+
+def test_with_qdrant_unreachable_the_run_fails_after_its_retries(
+    settings, tmp_path, logged
+):
+    closed = replace(
+        settings, url="http://localhost:1", data_dir=tmp_path, max_attempts=3
+    )
+    fill(closed)
+    summary = index_run(closed)
+    assert (summary.status, summary.exit_code) == ("failed", 1)
+    assert "did not answer collection_exists in 3 attempts" in summary.error
+    assert summary.retries == 2
+    attempts = [r for r in logged.records if "(attempt" in r.getMessage()]
+    assert len(attempts) == 3
+    assert summary.plan is None
+
+
+@pytest.mark.network
+def test_ctrl_c_mid_write_exits_130_and_the_next_run_finishes(
+    run_settings, collection, client, monkeypatch
+):
+    fill(run_settings)
+    small = replace(run_settings, batch_size=2)
+    upsert = QdrantStore.upsert
+    upserts = []
+
+    def stop_on_second(self, *args, **kwargs):
+        upserts.append(args)
+        if len(upserts) == 2:
+            raise KeyboardInterrupt
+        return upsert(self, *args, **kwargs)
+
+    monkeypatch.setattr(QdrantStore, "upsert", stop_on_second)
+    stopped = index_run(small)
+    assert (stopped.status, stopped.exit_code) == ("interrupted", 130)
+    assert stopped.written is None
+    monkeypatch.setattr(QdrantStore, "upsert", upsert)
+
+    resumed = index_run(small)
+    assert resumed.status == "completed"
+    assert resumed.plan.current == {PAGES[0]}  # its batch went in before the stop
+    assert client.count(collection, exact=True).count == len(ROWS)
+    assert index_run(small).plan.current == set(PAGES)
+
+
+@pytest.mark.network
+def test_sigterm_stops_the_run_like_ctrl_c(run_settings, monkeypatch):
+    fill(run_settings)
+    before = signal.getsignal(signal.SIGTERM)
+    upsert = QdrantStore.upsert
+
+    def terminated(self, *args, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return upsert(self, *args, **kwargs)
+
+    monkeypatch.setattr(QdrantStore, "upsert", terminated)
+    summary = index_run(run_settings)
+    assert (summary.status, summary.exit_code) == ("interrupted", 130)
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+@pytest.mark.network
+def test_an_orphan_is_warned_about_once_as_read_and_named_after_the_summary(
+    run_settings, collection, client, logged
+):
+    orphan = row_of(PAGES[0], index=9, vector=[1.0, 0.0, 0.0, 0.0])
+    fill(run_settings, orphans=[orphan])
+    summary = index_run(run_settings)
+    assert summary.status == "completed"
+    assert summary.orphans == ((orphan.chunk_id, 0),)
+    assert client.count(collection, exact=True).count == len(ROWS)
+    about = [r for r in logged.records if orphan.chunk_id in r.getMessage()]
+    assert [r.levelno for r in about] == [logging.WARNING, logging.WARNING]
+    assert about[0].getMessage().startswith("skipping orphaned row")
+    assert about[1].getMessage().startswith("skipped 1 orphaned row(s)")
+    [line] = [r for r in logged.records if r.getMessage().startswith("completed in")]
+    assert "1 orphaned rows skipped" in line.getMessage()
+
+
+def reembed(settings: Settings, row: StoredVector) -> None:
+    with EmbeddingsStore(settings.embeddings_path) as embeddings:
+        embeddings.upsert(row.chunk_id, [embedding_row_for(changed_vector(row))])
+
+
+@pytest.mark.network
+def test_an_unanswered_save_question_fails_before_writing(run_settings, collection):
+    fill(run_settings)
+    index_run(run_settings)
+    reembed(run_settings, ROWS[2])
+    summary = index_run(run_settings)
+    assert (summary.status, summary.exit_code) == ("failed", 1)
+    assert "--save-old or --no-save-old" in summary.error
+    assert summary.plan.changed == {PAGES[1]}
+    assert summary.written is None
+    # Nothing was written: the page is still due for replacement.
+    assert index_run(run_settings, save_old=False).plan.changed == {PAGES[1]}
+
+
+@pytest.mark.network
+def test_save_old_saves_before_writing(run_settings, collection, restore, name):
+    fill(run_settings)
+    index_run(run_settings)
+    reembed(run_settings, ROWS[2])
+    summary = index_run(run_settings, save_old=True)
+    assert summary.status == "completed"
+    [path] = summary.saved
+    assert path.parent == run_settings.snapshots_dir
+    assert summary.written == (1, 1, 2)
+    assert restore(path, f"{name}_restored") == len(ROWS)
+
+
+@pytest.mark.network
+def test_a_qdrant_error_fails_the_run_without_retrying(run_settings):
+    fill(run_settings)
+    summary = index_run(replace(run_settings, api_key="not-the-key"))
+    assert (summary.status, summary.exit_code) == ("failed", 1)
+    assert summary.retries == 0
+    assert summary.error
+
+
+def test_rows_that_disagree_on_dimensions_stop_before_qdrant(settings, tmp_path):
+    closed = replace(settings, url="http://localhost:1", data_dir=tmp_path)
+    wide = row_of(PAGES[0], index=5, vector=[1.0] * 8)
+    fill(closed, [*ROWS, wide])
+    summary = index_run(closed)
+    assert summary.status == "failed"
+    assert "disagree on dimensions: 6 rows at 4, 1 rows at 8" in summary.error
+    assert summary.retries == 0  # Qdrant was never called
+    assert summary.collection is None
+
+
+def test_no_rows_of_the_model_stops_the_run(settings, tmp_path):
+    closed = replace(settings, url="http://localhost:1", data_dir=tmp_path)
+    summary = index_run(closed)
+    assert summary.status == "failed"
+    assert "no ok rows of openai/text-embedding-3-small" in summary.error
+
+
+def test_exit_codes_match_embed_run():
+    assert EXIT_CODES == {"completed": 0, "interrupted": 130, "failed": 1}

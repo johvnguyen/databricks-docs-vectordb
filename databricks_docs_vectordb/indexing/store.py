@@ -6,8 +6,9 @@ model, holding a dense vector at the rows' dimensions, room for one sparse
 vector, and `keyword` indexes on the two payload fields that are filtered
 on.
 
-Nothing here retries: the runner owns retries and backoff (Q34), so the
-client's own are not relied on.
+Nothing here retries: the runner wraps the store in `RetryingStore` (Q34),
+so the client's own retries are not relied on. Each method is one attempt
+there, and every method a run calls is safe to repeat.
 """
 
 import contextlib
@@ -151,6 +152,14 @@ class QdrantStore:
             with contextlib.suppress(Exception):
                 self._client.delete_collection(name)
             raise
+
+    def recreate_collection(self, name: str, *, dimensions: int) -> None:
+        """Drop `name` if it exists, then `create_collection` it. Safe to
+        repeat, unlike `create_collection`: a retry after a create that went
+        through but timed out drops what that attempt made."""
+        if self._client.collection_exists(name):
+            self._client.delete_collection(name)
+        self.create_collection(name, dimensions=dimensions)
 
     def settings_mismatches(self, name: str, *, dimensions: int) -> list[str]:
         """How `name` differs from what `create_collection` would make of it

@@ -5,28 +5,56 @@ So far this holds the read side (Step 4), shared with `index verify`: the
 orphan check, and the mapping from an embeddings row to the point it
 becomes. Then the loader (Step 5): comparing the rows with what Qdrant
 holds to decide what a run is to do, the question whether to save what it
-would change, both before anything is written, and then the writes.
+would change, both before anything is written, then the writes, and the
+`Runner` that does all of it with retries, a summary and an exit status.
 """
 
 import array
+import functools
 import hashlib
 import logging
 import math
+import random
+import signal
 import sys
+import time
 import uuid
 from collections.abc import Callable, Container, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import batched
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, Literal, NamedTuple, cast
 
-from databricks_docs_vectordb.embedding.store import StoredVector, unpack_embedding
+import httpx
+from qdrant_client.http.exceptions import ApiException, ResponseHandlingException
+
+from databricks_docs_vectordb.embedding.store import (
+    EmbeddingsStore,
+    ModelInfo,
+    StoredVector,
+    unpack_embedding,
+)
 from databricks_docs_vectordb.indexing.config import Settings
-from databricks_docs_vectordb.indexing.store import Point, QdrantStore
+from databricks_docs_vectordb.indexing.store import Point, QdrantStore, collection_name
 from databricks_docs_vectordb.parsing.report import section_of
+from databricks_docs_vectordb.parsing.store import ChunkStore
 from databricks_docs_vectordb.scraping.config import SOURCES, Source
+from databricks_docs_vectordb.scraping.manifest import Manifest
 
 logger = logging.getLogger(__name__)
+
+RunStatus = Literal["completed", "interrupted", "failed"]
+
+# `embed run`'s exit codes: 130 is the shell's convention for Ctrl-C.
+EXIT_CODES: dict[RunStatus, int] = {"completed": 0, "interrupted": 130, "failed": 1}
+
+# What a retry can help with (Q34): the connection failed or timed out.
+# qdrant-client wraps these in ResponseHandlingException; `save_snapshot`'s
+# download raises them as they are.
+_RETRYABLE = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+
+# How many orphaned rows the summary's warning names before it just counts.
+ORPHANS_NAMED = 10
 
 # Every point ID is derived from this, so changing it changes them all (Q7).
 POINT_ID_NAMESPACE = uuid.UUID("2405f98a-c138-459f-b780-53782478d987")
@@ -277,13 +305,9 @@ def write(
     loaded (changed next time).
     """
     deleted = plan.changed | plan.removed
-    if plan.refresh:
-        if plan.exists:
-            qdrant.delete_collection(plan.collection)
-        qdrant.create_collection(plan.collection, dimensions=plan.dimensions)
+    if plan.refresh or not plan.exists:
+        qdrant.recreate_collection(plan.collection, dimensions=plan.dimensions)
     else:
-        if not plan.exists:
-            qdrant.create_collection(plan.collection, dimensions=plan.dimensions)
         for urls in batched(sorted(deleted), settings.batch_size):
             qdrant.delete_pages(plan.collection, urls)
 
@@ -387,3 +411,322 @@ def _changes(plan: Plan) -> str:
     if plan.old_collections:
         parts.append(f"delete the old collection(s) {', '.join(plan.old_collections)}")
     return "; ".join(parts)
+
+
+class QdrantUnreachable(Exception):
+    """A Qdrant call still failed to connect, or timed out, on its last
+    attempt."""
+
+
+class RunFailed(Exception):
+    """`index run` cannot go ahead; the message says why."""
+
+
+class RetryingStore:
+    """A `QdrantStore` whose every method call is retried on a connection
+    error or a timeout (Q34): up to `settings.max_attempts` attempts, with
+    exponential backoff and jitter, each failed attempt logged. After the
+    last, `QdrantUnreachable` is raised. Any other error is raised at once.
+
+    A whole method call is one attempt, so it relies on every store method
+    a run calls being safe to repeat.
+    """
+
+    def __init__(
+        self,
+        store: QdrantStore,
+        settings: Settings,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        rng: Callable[[], float] = random.random,
+    ) -> None:
+        self._store = store
+        self._settings = settings
+        self._sleep = sleep
+        self._rng = rng
+        self.retries = 0
+
+    def __getattr__(self, name: str) -> Any:
+        method = getattr(self._store, name)
+
+        @functools.wraps(method)
+        def call(*args: Any, **kwargs: Any) -> Any:
+            attempts = self._settings.max_attempts
+            for attempt in range(1, attempts + 1):
+                try:
+                    return method(*args, **kwargs)
+                except Exception as e:
+                    cause = _retryable_cause(e)
+                    if cause is None:
+                        raise
+                    reason = f"{type(cause).__name__}: {cause}"
+                    if attempt == attempts:
+                        logger.error(
+                            "qdrant %s: %s; giving up (attempt %d/%d)",
+                            name,
+                            reason,
+                            attempt,
+                            attempts,
+                        )
+                        raise QdrantUnreachable(
+                            f"Qdrant at {self._settings.url} did not answer "
+                            f"{name} in {attempts} attempts (last: {reason})"
+                        ) from e
+                    delay = _backoff(attempt, self._settings, self._rng())
+                    logger.warning(
+                        "qdrant %s: %s; retrying in %.1fs (attempt %d/%d)",
+                        name,
+                        reason,
+                        delay,
+                        attempt,
+                        attempts,
+                    )
+                    self.retries += 1
+                    self._sleep(delay)
+
+        return call
+
+
+@dataclass(frozen=True)
+class RunSummary:
+    status: RunStatus
+    collection: str | None  # None if the run stopped before naming it
+    plan: Plan | None  # None if the run stopped before the compare finished
+    saved: tuple[Path, ...]  # snapshots saved before writing
+    written: Written | None  # None if the run stopped before the write finished
+    orphans: tuple[tuple[str, int], ...]  # (chunk_id, sub_index) of rows skipped
+    retries: int
+    elapsed: float
+    error: str | None = None  # why a failed run failed
+
+    @property
+    def exit_code(self) -> int:
+        return EXIT_CODES[self.status]
+
+
+class Runner:
+    """`index run`: compare the configured model's rows with what Qdrant
+    holds, ask the save question, save, then write.
+
+    - Every Qdrant call goes through `RetryingStore`. There is no rate
+      limiter or circuit breaker (Q19).
+    - Ctrl-C or SIGTERM stops the run where it is (`interrupted`). That is
+      safe anywhere: nothing is written before the save question, and
+      `write` orders its deletes and batches so that every page is left
+      current or due for replacement, which the next run's compare finds.
+    - A connection that still fails after its retries, any other Qdrant
+      error, or an unanswered save question ends the run as `failed`.
+    - Orphans are warned about as the compare reads them (`skip_orphans`),
+      and again, by name, after the summary line.
+
+    A Runner does one run.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        model: ModelInfo,
+        embeddings: EmbeddingsStore,
+        chunks: ChunkStore,
+        manifest: Manifest,
+        qdrant: QdrantStore,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        rng: Callable[[], float] = random.random,
+        ask: Callable[[str], str] = input,
+        interactive: bool | None = None,
+    ) -> None:
+        self._settings = settings
+        self._model = model
+        self._embeddings = embeddings
+        self._chunks = chunks
+        self._manifest = manifest
+        self._retrying = RetryingStore(qdrant, settings, sleep=sleep, rng=rng)
+        # Every QdrantStore method, each call retried.
+        self._qdrant = cast(QdrantStore, self._retrying)
+        self._clock = clock
+        self._ask = ask
+        self._interactive = interactive
+
+    def run(
+        self,
+        *,
+        refresh: bool = False,
+        save_old: bool | None = None,
+        handle_signals: bool = True,
+    ) -> RunSummary:
+        """One `index run [--refresh] [--save-old | --no-save-old]`;
+        `save_old` is None when neither flag was given."""
+        started = self._clock()
+        orphans: list[StoredVector] = []
+        collection: str | None = None
+        plan: Plan | None = None
+        saved: list[Path] = []
+        written: Written | None = None
+        status: RunStatus = "completed"
+        error: str | None = None
+        previous = _raise_on_sigterm() if handle_signals else None
+        try:
+            dimensions = self._dimensions()
+            collection = collection_name(
+                self._settings.collection_prefix, self._model, dimensions
+            )
+            chunk_ids = self._chunks.chunk_ids()
+            ok_pages = {page.url for page in self._manifest.pages_with_status("ok")}
+            logger.info(
+                "starting: %s/%s rows into %s at %s%s",
+                self._model.provider,
+                self._model.model,
+                collection,
+                self._settings.url,
+                ", rebuilding it (--refresh)" if refresh else "",
+            )
+            plan = compare(
+                self._qdrant,
+                collection,
+                skip_orphans(self._rows(), chunk_ids, orphans),
+                ok_pages,
+                self._settings,
+                dimensions=dimensions,
+                refresh=refresh,
+            )
+            if should_save(
+                plan,
+                self._settings,
+                save_old,
+                ask=self._ask,
+                interactive=self._interactive,
+            ):
+                saved = save_affected(self._qdrant, plan, self._settings)
+            # The compare warned about each orphan; skipped quietly here.
+            rows = (row for row in self._rows() if row.chunk_id in chunk_ids)
+            written = write(self._qdrant, plan, rows, self._settings)
+        except KeyboardInterrupt:
+            status = "interrupted"
+            logger.warning("interrupted: stopping now; run it again to finish")
+        except (
+            RunFailed,
+            SaveQuestionUnanswered,
+            QdrantUnreachable,
+            ApiException,
+            httpx.HTTPError,
+        ) as e:
+            status, error = "failed", str(e) or type(e).__name__
+            logger.error("failed: %s", error)
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
+
+        summary = RunSummary(
+            status=status,
+            collection=collection,
+            plan=plan,
+            saved=tuple(saved),
+            written=written,
+            orphans=tuple((row.chunk_id, row.sub_index) for row in orphans),
+            retries=self._retrying.retries,
+            elapsed=self._clock() - started,
+            error=error,
+        )
+        _log_summary(summary)
+        return summary
+
+    def _rows(self) -> Iterator[StoredVector]:
+        return self._embeddings.ok_vectors(self._model)
+
+    def _dimensions(self) -> int:
+        """The vector size of the configured model's `ok` rows, which names
+        the collection. Raises `RunFailed` if there are none, or if they
+        disagree."""
+        found = {
+            key.dimensions: counts.ok
+            for key, counts in self._embeddings.counts_by_model().items()
+            if (key.provider, key.model, key.model_version) == tuple(self._model)
+            and counts.ok
+        }
+        name = f"{self._model.provider}/{self._model.model}"
+        if not found:
+            raise RunFailed(
+                f"embeddings.sqlite has no ok rows of {name}: run `embed run` first"
+            )
+        if len(found) > 1:
+            raise RunFailed(
+                f"the {name} rows disagree on dimensions: "
+                + ", ".join(f"{n} rows at {d}" for d, n in sorted(found.items()))
+            )
+        [dimensions] = found
+        assert dimensions is not None  # an ok row always has its dimensions
+        return dimensions
+
+
+def _raise_on_sigterm() -> Any:
+    """Make SIGTERM stop the run the way Ctrl-C does. Returns the handler to
+    put back, or None where one can't be set (not the main thread)."""
+
+    def interrupt(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        return signal.signal(signal.SIGTERM, interrupt)
+    except ValueError:
+        return None
+
+
+def _retryable_cause(error: Exception) -> Exception | None:
+    """The connection error or timeout behind `error`, or None if it is
+    something a retry won't fix."""
+    if isinstance(error, ResponseHandlingException):
+        error = error.source
+    return error if isinstance(error, _RETRYABLE) else None
+
+
+def _backoff(attempt: int, settings: Settings, unit: float) -> float:
+    """Exponential backoff with jitter (50-100% of the nominal delay). Same
+    curve as `scraping/fetcher.py`'s and `embedding/runner.py`'s."""
+    nominal = min(settings.backoff_max, settings.backoff_base * 2 ** (attempt - 1))
+    return nominal * (0.5 + unit / 2)
+
+
+def _log_summary(summary: RunSummary) -> None:
+    """The summary line, like `embed run`'s, then a warning naming any
+    orphans."""
+    parts = []
+    if summary.error:
+        parts.append(summary.error)
+    if summary.plan is not None:
+        plan = summary.plan
+        parts.append(
+            f"pages: {len(plan.new)} new, {len(plan.changed)} changed, "
+            f"{len(plan.removed)} removed, {len(plan.current)} current, "
+            f"{len(plan.not_ok)} not ok in the manifest"
+        )
+        if summary.written is not None:
+            parts.append(
+                f"{summary.written.points} points upserted, "
+                f"{summary.written.pages_deleted} pages' points deleted"
+            )
+        else:
+            parts.append("the write did not finish; the next run picks it up")
+        if plan.old_collections:
+            parts.append(f"old collections kept: {', '.join(plan.old_collections)}")
+    if summary.saved:
+        parts.append(f"{len(summary.saved)} snapshot(s) saved")
+    parts.append(f"{summary.retries} retries")
+    parts.append(f"{len(summary.orphans)} orphaned rows skipped")
+    logger.info(
+        "%s in %.0fs%s: %s",
+        summary.status,
+        summary.elapsed,
+        f" ({summary.collection})" if summary.collection else "",
+        "; ".join(parts),
+    )
+    if summary.orphans:
+        named = [f"{c} (sub_index {i})" for c, i in summary.orphans[:ORPHANS_NAMED]]
+        more = len(summary.orphans) - len(named)
+        logger.warning(
+            "skipped %d orphaned row(s), whose chunk_id is not in parsed.sqlite: %s%s",
+            len(summary.orphans),
+            ", ".join(named),
+            f", and {more} more" if more else "",
+        )
