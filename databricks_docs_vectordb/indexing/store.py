@@ -19,7 +19,7 @@ import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from types import TracebackType
-from typing import NamedTuple, Self
+from typing import Any, NamedTuple, Self
 
 import httpx
 from qdrant_client import QdrantClient, models
@@ -36,6 +36,10 @@ SPARSE_VECTOR_NAME = "sparse"
 # The page filter and the section filter (Q9). Every field filtered on gets a
 # payload index; `chunk_id` and `sub_index` are lookup keys, not filters.
 KEYWORD_INDEXES = ("url", "section")
+
+# A point's payload: the lookup key back into embeddings.sqlite, then the two
+# filters (Q9).
+PAYLOAD_FIELDS = ("chunk_id", "sub_index", "url", "section")
 
 # Points per scroll request: what the full scans under "Qdrant, measured" used.
 SCROLL_LIMIT = 1000
@@ -68,13 +72,20 @@ class Point(NamedTuple):
 
 
 class StoredPoint(NamedTuple):
-    """A point as read back: its ID, its page and section, and its vector if
-    asked for."""
+    """A point as read back: its ID, its `PAYLOAD_FIELDS` as stored (a field
+    can be missing, or of the wrong type), and its vector if asked for."""
 
     id: str
-    url: str
-    section: str
+    payload: dict[str, Any]
     vector: list[float] | None
+
+    @property
+    def url(self) -> str:
+        return str(self.payload.get("url", ""))
+
+    @property
+    def section(self) -> str:
+        return str(self.payload.get("section", ""))
 
 
 def connect(settings: Settings) -> QdrantClient:
@@ -280,6 +291,11 @@ class QdrantStore:
     def collection_exists(self, name: str) -> bool:
         return self._client.collection_exists(name)
 
+    def collection_status(self, name: str) -> str:
+        """`green`, `yellow` (optimizing), `grey` (optimizations pending) or
+        `red` (an optimization failed)."""
+        return self._client.get_collection(name).status.value
+
     def count(self, name: str) -> int:
         """How many points `name` holds, counted exactly."""
         return self._client.count(name, exact=True).count
@@ -294,21 +310,20 @@ class QdrantStore:
         """Up to `SCROLL_LIMIT` points of `name`, from `offset` (the start
         when None), and the offset of the next request, None after the last.
 
-        One request, so the runner can retry it on its own. Only the `url`
-        and `section` payload fields are read.
+        One request, so the runner can retry it on its own. Only the
+        `PAYLOAD_FIELDS` are read.
         """
         records, next_offset = self._client.scroll(
             collection_name=name,
             limit=SCROLL_LIMIT,
             offset=offset,
-            with_payload=["url", "section"],
+            with_payload=list(PAYLOAD_FIELDS),
             with_vectors=with_vectors,
         )
         points = [
             StoredPoint(
                 id=str(r.id),
-                url=str((r.payload or {}).get("url", "")),
-                section=str((r.payload or {}).get("section", "")),
+                payload=dict(r.payload or {}),
                 vector=r.vector if with_vectors else None,
             )
             for r in records

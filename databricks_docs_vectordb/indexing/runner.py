@@ -113,15 +113,20 @@ def unit_vector(values: Sequence[float]) -> list[float]:
     return array.array("f", [x / norm for x in values]).tolist()
 
 
+def point_section(row: StoredVector, sources: Sequence[Source] = SOURCES) -> str:
+    """`<source>/<section>`, the section as `parse status` reports it
+    (`section_of`): `aws-en/sql`, `api/jobs`, or `aws-en/(top-level)` for a
+    top-level page."""
+    return f"{row.source}/{section_of(row.url, row.source, sources)}"
+
+
 def to_point(
     row: StoredVector, *, normalize: bool, sources: Sequence[Source] = SOURCES
 ) -> Point:
     """The point `row` becomes: its ID, its vector (the BLOB unchanged
     unless `normalize`), and the four payload fields (Q9).
 
-    `section` is `<source>/<section>`, the section as `parse status`
-    reports it (`section_of`): `aws-en/sql`, `api/jobs`, or
-    `aws-en/(top-level)` for a top-level page.
+    `section` is `point_section(row)`.
     """
     # Unnormalized vectors only round-trip under `Dot`; `Cosine` re-normalizes them.
     values = unpack_embedding(row.embedding)
@@ -136,7 +141,7 @@ def to_point(
             "chunk_id": row.chunk_id,
             "sub_index": row.sub_index,
             "url": row.url,
-            "section": f"{row.source}/{section_of(row.url, row.source, sources)}",
+            "section": point_section(row, sources),
         },
     )
 
@@ -221,7 +226,7 @@ def compare(
         )
         for point in points:
             stored.setdefault(point.url, {})[point.id] = (
-                None if point.vector is None else _vector_hash(point.vector)
+                None if point.vector is None else vector_hash(point.vector)
             )
         if offset is None:
             break
@@ -235,7 +240,7 @@ def compare(
         page = expected.setdefault(row.url, {})
         if row.url in stored and not refresh:
             point = to_point(row, normalize=settings.normalize)
-            page[point.id] = _vector_hash(point.vector)
+            page[point.id] = vector_hash(point.vector)
 
     both = stored.keys() & expected.keys()
     changed = both if refresh else {u for u in both if stored[u] != expected[u]}
@@ -273,7 +278,7 @@ def compare(
     return plan
 
 
-def _vector_hash(vector: Sequence[float]) -> bytes:
+def vector_hash(vector: Sequence[float]) -> bytes:
     """A hash of `vector` as float32, the precision Qdrant stores, so a
     vector read back hashes the same as the one written."""
     return hashlib.blake2b(array.array("f", vector).tobytes(), digest_size=16).digest()
