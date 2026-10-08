@@ -29,6 +29,10 @@ from databricks_docs_vectordb.indexing.runner import RunFailed, configured_dimen
 from databricks_docs_vectordb.indexing.runner import Runner as IndexRunner
 from databricks_docs_vectordb.indexing.runner import RunSummary as IndexSummary
 from databricks_docs_vectordb.indexing.store import QdrantStore, collection_name
+from databricks_docs_vectordb.indexing.verify import (
+    format_report as format_index_verify,
+)
+from databricks_docs_vectordb.indexing.verify import verify_collection
 from databricks_docs_vectordb.parsing.config import Settings as ParsingSettings
 from databricks_docs_vectordb.parsing.pipeline import is_current, parse_pages
 from databricks_docs_vectordb.parsing.report import (
@@ -403,6 +407,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also break the counts down by source/section",
     )
+
+    index_verify = index_sub.add_parser(
+        "verify",
+        help="check every point of the collection against the embeddings "
+        "store, parsed.sqlite and the manifest",
+        description=(
+            "Check every point: its vector is its row's BLOB after "
+            "normalization, its payload is its row's, its row is current (an "
+            "ok row of the configured model, whose chunk is in parsed.sqlite "
+            "and whose page is ok in the manifest), and the collection's "
+            "settings are the configured ones and it is not red. Reports "
+            "every problem; exits 1 if there are any. Needs QDRANT_API_KEY; "
+            "changes nothing."
+        ),
+    )
+    index_verify.add_argument(
+        "--complete",
+        action="store_true",
+        help="loading should be finished: a current row with no point is a "
+        "violation",
+    )
+    index_verify.add_argument(
+        "--by-section",
+        action="store_true",
+        help="also break the counts down by source/section",
+    )
     return parser
 
 
@@ -489,6 +519,8 @@ def main_index(args: argparse.Namespace) -> int:
             return run_index_run(settings, model, args)
         case "status":
             return run_index_status(settings, model, args)
+        case "verify":
+            return run_index_verify(settings, model, args)
     return 2
 
 
@@ -1067,19 +1099,52 @@ def run_index_status(
         except RunFailed as e:
             raise CliError(str(e)) from e
     name = collection_name(settings.collection_prefix, model, dimensions)
-    # One attempt, no retries: a status should answer at once.
+    with qdrant_errors(settings), QdrantStore(settings) as qdrant:
+        lines = index_status_lines(
+            qdrant, settings, name, dimensions, by_section=args.by_section
+        )
+    print("\n".join(lines))
+    return 0
+
+
+@contextmanager
+def qdrant_errors(settings: IndexingSettings) -> Iterator[None]:
+    """Report a Qdrant error as a `CliError` naming the server. `status` and
+    `verify` make one attempt, with no retries: they should answer at once."""
     try:
-        with QdrantStore(settings) as qdrant:
-            lines = index_status_lines(
-                qdrant, settings, name, dimensions, by_section=args.by_section
-            )
+        yield
     except (ApiException, httpx.HTTPError) as e:
         cause = e.source if isinstance(e, ResponseHandlingException) else e
         raise CliError(
             f"Qdrant at {settings.url}: {type(cause).__name__}: {cause}"
         ) from e
-    print("\n".join(lines))
-    return 0
+
+
+def run_index_verify(
+    settings: IndexingSettings, model: ModelInfo, args: argparse.Namespace
+) -> int:
+    require_embedded(settings)
+    with (
+        qdrant_errors(settings),
+        EmbeddingsStore(settings.embeddings_path) as embeddings,
+        ChunkStore(settings.parsed_path) as chunks,
+        Manifest(settings.manifest_path) as manifest,
+        QdrantStore(settings) as qdrant,
+    ):
+        try:
+            report = verify_collection(
+                qdrant,
+                settings,
+                model,
+                embeddings,
+                chunks,
+                manifest,
+                complete=args.complete,
+            )
+        except RunFailed as e:
+            raise CliError(str(e)) from e
+    print(format_index_verify(report, by_section=args.by_section))
+    return 0 if report.ok else 1
 
 
 def index_status_lines(

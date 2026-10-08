@@ -12,6 +12,7 @@ from databricks_docs_vectordb.embedding.store import (
     EmbeddingsStore,
     pack_embedding,
 )
+from databricks_docs_vectordb.indexing.runner import point_id
 from databricks_docs_vectordb.indexing.store import QdrantStore
 from databricks_docs_vectordb.parsing.store import Chunk, ChunkStore
 from databricks_docs_vectordb.scraping.manifest import Manifest
@@ -144,12 +145,11 @@ def collection(name: str) -> str:
 # -- help and usage -----------------------------------------------------------------
 
 
-def test_index_help_lists_run_and_status(capsys):
+def test_index_help_lists_its_subcommands(capsys):
     with pytest.raises(SystemExit) as exit:
         main(["index", "--help"])
     assert exit.value.code == 0
-    out = capsys.readouterr().out
-    assert "run" in out and "status" in out
+    assert "{run,status,verify}" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -157,6 +157,7 @@ def test_index_help_lists_run_and_status(capsys):
     [
         ("run", ["--refresh", "--save-old", "--no-save-old"]),
         ("status", ["--by-section"]),
+        ("verify", ["--complete", "--by-section"]),
     ],
 )
 def test_each_subcommand_lists_its_flags(capsys, command, flags):
@@ -327,3 +328,56 @@ def test_status_reports_a_settings_mismatch(sidecar, monkeypatch, name, capsys):
         "differs from the settings: distance is Cosine, configured Dot"
         in capsys.readouterr().out
     )
+
+
+# -- index verify -------------------------------------------------------------------
+
+
+def test_verify_without_embeddings_says_to_embed_first(env, capsys):
+    assert main(["index", "verify"]) == 1
+    assert "embed run" in capsys.readouterr().err
+
+
+def test_verify_with_qdrant_unreachable_fails_at_once(env, capsys):
+    fill(env)
+    assert main(["index", "verify"]) == 1
+    assert (
+        "error: Qdrant at http://localhost:1: ConnectError" in capsys.readouterr().err
+    )
+
+
+@pytest.mark.network
+def test_verify_passes_after_a_run_even_with_complete(sidecar, capsys):
+    main(["index", "run"])
+    capsys.readouterr()
+    assert main(["index", "verify"]) == 0
+    assert capsys.readouterr().out.endswith("\nOK\n")
+    assert main(["index", "verify", "--complete", "--by-section"]) == 0
+    out = capsys.readouterr().out
+    rows = [line.split() for line in out.splitlines() if "aws-en/p" in line]
+    assert rows == [[f"aws-en/p{i}", "2", "2", "0", "0"] for i in range(3)]
+    assert out.endswith("\nOK\n")
+
+
+@pytest.mark.network
+def test_verify_before_any_run_fails_only_with_complete(sidecar, name, capsys):
+    assert main(["index", "verify"]) == 0
+    assert f"{collection(name)} does not exist yet" in capsys.readouterr().out
+    assert main(["index", "verify", "--complete"]) == 1
+    assert f"FAILED: {POINTS} violations" in capsys.readouterr().out
+
+
+@pytest.mark.network
+def test_verify_exits_1_naming_a_tampered_point(sidecar, client, name, capsys):
+    main(["index", "run"])
+    capsys.readouterr()
+    tampered = f"{PAGES[1]}#0"
+    client.update_vectors(
+        collection(name),
+        points=[models.PointVectors(id=point_id(tampered, 0), vector=[1, 0, 0, 0])],
+        wait=True,
+    )
+    assert main(["index", "verify"]) == 1
+    out = capsys.readouterr().out
+    assert f"[vector-mismatch] {tampered} (sub_index 0)" in out
+    assert out.endswith("FAILED: 1 violations\n")
