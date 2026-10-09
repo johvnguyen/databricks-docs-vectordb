@@ -51,6 +51,7 @@ def make_chunk(url: str, index: int, chunk_id: str | None = None, **overrides) -
         "text": f"chunk {index} text",
         "char_count": len(f"chunk {index} text"),
         "token_count": None,
+        "token_count_model": None,
         "is_oversized": False,
         "last_updated": "2026-09-11",
         "page_sha256": "ab" * 32,

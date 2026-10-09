@@ -30,6 +30,11 @@ class TokenBucket:
     With the default capacity of one there are no bursts, so requests are
     evenly spaced. Waiters are served in order. `clock` and `sleep` are
     injectable so tests don't need real time.
+
+    `acquire(amount)` takes more than one token at a time, for limiting
+    something other than request count (embedding/runner.py's
+    tokens-per-minute budget); `amount` can't exceed `capacity`, or it
+    could never be satisfied.
     """
 
     def __init__(
@@ -50,7 +55,11 @@ class TokenBucket:
         self._updated = self._clock()
         self._lock = asyncio.Lock()
 
-    async def acquire(self) -> None:
+    async def acquire(self, amount: float = 1.0) -> None:
+        if not 0 < amount <= self._capacity:
+            raise ValueError(
+                f"amount must be > 0 and <= capacity ({self._capacity}), got {amount}"
+            )
         async with self._lock:  # holding it while we wait keeps waiters in order
             while True:
                 now = self._clock()
@@ -58,10 +67,10 @@ class TokenBucket:
                     self._capacity, self._tokens + (now - self._updated) * self._rate
                 )
                 self._updated = now
-                if self._tokens >= 1:
-                    self._tokens -= 1
+                if self._tokens >= amount:
+                    self._tokens -= amount
                     return
-                await self._sleep((1 - self._tokens) / self._rate)
+                await self._sleep((amount - self._tokens) / self._rate)
 
 
 @dataclass(frozen=True)

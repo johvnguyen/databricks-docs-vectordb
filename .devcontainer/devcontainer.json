@@ -1,17 +1,21 @@
 {
   "name": "databricks-docs-vectordb",
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "dockerComposeFile": "../compose.yaml",
+  "service": "dev",
+  "workspaceFolder": "/workspaces/databricks-docs-vectordb",
 
   "features": {
     "ghcr.io/devcontainers/features/node:1": {},  // Needed for Claude Code
-    "ghcr.io/devcontainers/features/git:1": {}
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
   },
 
-  // uv's cache and the project's .venv can sit
+  // uv's cache and the project's .venv can sit on different filesystems,
   // which breaks hardlinking and spams warnings. Copy mode avoids that.
   "containerEnv": { "UV_LINK_MODE": "copy" },
 
-  "postCreateCommand": "pipx install uv && npm install -g @anthropic-ai/claude-code",
+  "postCreateCommand": "pipx install uv && (sudo rm -f /etc/apt/sources.list.d/yarn.list && sudo apt-get update && sudo apt-get install -y sqlite3 || true)",
 
   "customizations": {
     "vscode": {
@@ -21,7 +25,7 @@
   },
 
   "mounts": [
-    "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"
   ],
   "remoteUser": "vscode"
 }

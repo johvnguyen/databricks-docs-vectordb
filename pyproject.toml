@@ -10,9 +10,12 @@ requires-python = ">=3.12"
 dependencies = [
     "beautifulsoup4>=4.15.0",
     "httpx>=0.28.1",
+    "litellm>=1.103.0",
     "lxml>=6.1.3",
     "protego>=0.6.2",
     "python-dotenv>=1.2.3",
+    "qdrant-client==1.19.1",
+    "tiktoken>=0.14.0",
 ]
 
 [project.scripts]
@@ -34,6 +37,12 @@ dev = [
 module-root=""
 
 [tool.pytest.ini_options]
-markers = ["network: hits the live Databricks docs site (run with `-m network`)"]
+markers = [
+    "network: hits the live Databricks docs site or the Qdrant sidecar (run with `-m network`)",
+]
 addopts = "-m 'not network'"
+# qdrant-client checks the server's version in a background thread, so the
+# warning from a test that points it at a closed port on purpose surfaces in
+# whichever test is running when that thread finishes.
+filterwarnings = ["ignore:Failed to obtain server version:UserWarning"]
 asyncio_mode = "auto"
