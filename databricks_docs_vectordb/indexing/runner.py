@@ -35,6 +35,7 @@ from databricks_docs_vectordb.embedding.store import (
     StoredVector,
     unpack_embedding,
 )
+from databricks_docs_vectordb.embedding.verify import verify_embeddings
 from databricks_docs_vectordb.indexing.config import Settings
 from databricks_docs_vectordb.indexing.store import Point, QdrantStore, collection_name
 from databricks_docs_vectordb.parsing.report import section_of
@@ -56,6 +57,9 @@ _RETRYABLE = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolEr
 
 # How many orphaned rows the summary's warning names before it just counts.
 ORPHANS_NAMED = 10
+
+# How many rows or findings a precondition error names before it just counts.
+PRECONDITION_NAMED = 5
 
 # Every point ID is derived from this, so changing it changes them all (Q7).
 POINT_ID_NAMESPACE = uuid.UUID("2405f98a-c138-459f-b780-53782478d987")
@@ -512,9 +516,16 @@ class RunSummary:
 
 
 class Runner:
-    """`index run`: compare the configured model's rows with what Qdrant
-    holds, ask the save question, save, write, then delete any old models'
-    collections, once the new one passes `index verify --complete` (Q37).
+    """`index run`: check its preconditions, compare the configured model's
+    rows with what Qdrant holds, ask the save question, save, write, then
+    delete any old models' collections, once the new one passes `index
+    verify --complete` (Q37).
+
+    - Preconditions (Q19, Q32), before anything else: `embed verify
+      --complete` is clean, and the configured model's rows agree on
+      `dimensions`. Otherwise the run fails, naming what failed. A clean
+      `embed verify` also rules out orphans, so `skip_orphans` is only a
+      safeguard.
 
     - Every Qdrant call goes through `RetryingStore`. There is no rate
       limiter or circuit breaker (Q19).
@@ -579,6 +590,7 @@ class Runner:
         error: str | None = None
         previous = _raise_on_sigterm() if handle_signals else None
         try:
+            self._check_embeddings()
             dimensions = configured_dimensions(self._embeddings, self._model)
             collection = collection_name(
                 self._settings.collection_prefix, self._model, dimensions
@@ -649,6 +661,30 @@ class Runner:
     def _rows(self) -> Iterator[StoredVector]:
         return self._embeddings.ok_vectors(self._model)
 
+    def _check_embeddings(self) -> None:
+        """The first precondition (Q32): `embed verify --complete` is clean.
+        Raises `RunFailed` naming the kinds of violation, and the first few."""
+        logger.info("checking the embeddings store, as `embed verify --complete`")
+        report = verify_embeddings(
+            self._chunks, self._embeddings, self._model, complete=True
+        )
+        if report.ok:
+            return
+        kinds = Counter(f.kind for f in report.violations)
+        first = report.violations[:PRECONDITION_NAMED]
+        raise RunFailed(
+            "`embed verify --complete` is not clean ("
+            + ", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items()))
+            + "), so nothing was loaded. First: "
+            + "; ".join(f"[{f.kind}] {f.where}" for f in first)
+            + (
+                f"; and {len(report.violations) - len(first)} more"
+                if len(report.violations) > len(first)
+                else ""
+            )
+            + ". `embed verify --complete` lists them all"
+        )
+
     def _delete_old_collections(self, plan: Plan, deleted: list[str]) -> None:
         """Delete `plan.old_collections`, appending each to `deleted`, but
         only once `plan.collection` passes the `index verify --complete`
@@ -699,9 +735,25 @@ def configured_dimensions(embeddings: EmbeddingsStore, model: ModelInfo) -> int:
             f"embeddings.sqlite has no ok rows of {name}: run `embed run` first"
         )
     if len(found) > 1:
+        common = max(found, key=lambda d: found[d])
+        odd = [
+            s
+            for s in embeddings.all_summaries()
+            if (s.provider, s.model, s.model_version) == tuple(model)
+            and s.status == "ok"
+            and s.dimensions != common
+        ]
+        named = [
+            f"{s.chunk_id} (sub_index {s.sub_index}) at {s.dimensions}"
+            for s in odd[:PRECONDITION_NAMED]
+        ]
+        if len(odd) > len(named):
+            named.append(f"and {len(odd) - len(named)} more")
         raise RunFailed(
-            f"the {name} rows disagree on dimensions: "
+            f"the {name} rows disagree on dimensions ("
             + ", ".join(f"{n} rows at {d}" for d, n in sorted(found.items()))
+            + f"); not at {common}: "
+            + ", ".join(named)
         )
     [dimensions] = found
     assert dimensions is not None  # an ok row always has its dimensions

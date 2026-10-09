@@ -14,6 +14,7 @@ import pytest
 from qdrant_client import models
 from qdrant_client.http.exceptions import ResponseHandlingException
 
+from databricks_docs_vectordb.embedding.runner import text_hash
 from databricks_docs_vectordb.embedding.store import (
     EmbeddingRow,
     EmbeddingsStore,
@@ -119,7 +120,7 @@ def make_row(
         description=None,
         last_updated=None,
         page_sha256="ab" * 32,
-        chunk_text_hash="cd" * 32,
+        chunk_text_hash=text_hash(f"chunk {index} text"),
         embedded_text=f"Delta Lake\n\nchunk {index} text",
         token_count=8,
         provider=model.provider,
@@ -1113,9 +1114,12 @@ def test_sigterm_stops_the_run_like_ctrl_c(run_settings, monkeypatch):
 
 
 @pytest.mark.network
-def test_an_orphan_is_warned_about_once_as_read_and_named_after_the_summary(
-    run_settings, collection, client, logged
+def test_the_orphan_safeguard_warns_once_as_read_and_names_it_after_the_summary(
+    run_settings, collection, client, logged, monkeypatch
 ):
+    """The precondition keeps orphans out (Q32); this is the safeguard
+    behind it, so the precondition is skipped here."""
+    monkeypatch.setattr(Runner, "_check_embeddings", lambda self: None)
     orphan = row_of(PAGES[0], index=9, vector=[1.0, 0.0, 0.0, 0.0])
     fill(run_settings, orphans=[orphan])
     summary = index_run(run_settings)
@@ -1177,9 +1181,112 @@ def test_rows_that_disagree_on_dimensions_stop_before_qdrant(settings, tmp_path)
     fill(closed, [*ROWS, wide])
     summary = index_run(closed)
     assert summary.status == "failed"
-    assert "disagree on dimensions: 6 rows at 4, 1 rows at 8" in summary.error
+    assert (
+        "disagree on dimensions (6 rows at 4, 1 rows at 8); "
+        f"not at 4: {wide.chunk_id} (sub_index 0) at 8" in summary.error
+    )
     assert summary.retries == 0  # Qdrant was never called
     assert summary.collection is None
+
+
+def test_more_odd_rows_than_named_are_counted(settings, tmp_path):
+    closed = replace(settings, url="http://localhost:1", data_dir=tmp_path)
+    wide = [row_of(PAGES[0], index=i, vector=[1.0] * 8) for i in range(10, 17)]
+    fill(closed, [*ROWS, *wide])
+    summary = index_run(closed)
+    # The 7 rows at 8 outnumber the 6 at 4, so the rows at 4 are the odd ones.
+    assert "(6 rows at 4, 7 rows at 8); not at 8: " in summary.error
+    assert summary.error.count("(sub_index 0) at 4") == 5
+    assert summary.error.endswith("and 1 more")
+
+
+# -- preconditions: `embed verify --complete` (Q32) -----------------------------
+
+
+def failed_precondition(settings, tmp_path, edit) -> "RunSummary":
+    """Fill the stores, `edit` them, then run against a closed port: a
+    precondition that fails stops the run before any Qdrant call."""
+    closed = replace(settings, url="http://localhost:1", data_dir=tmp_path)
+    fill(closed)
+    with open_stores(closed) as stores:
+        edit(*stores)
+    return index_run(closed)
+
+
+def test_a_stale_row_stops_the_run_before_anything(settings, tmp_path):
+    def reparse(embeddings, chunks, manifest):
+        changed = replace(chunk_for(ROWS[0]), text="re-parsed text")
+        chunks.replace_page_chunks(PAGES[0], [changed, chunk_for(ROWS[1])])
+
+    summary = failed_precondition(settings, tmp_path, reparse)
+    assert (summary.status, summary.exit_code) == ("failed", 1)
+    assert summary.error.startswith(
+        "`embed verify --complete` is not clean (1 stale-hash), so nothing was loaded"
+    )
+    assert f"First: [stale-hash] {ROWS[0].chunk_id}." in summary.error
+    assert (summary.collection, summary.plan, summary.retries) == (None, None, 0)
+
+
+def test_an_orphan_stops_the_run_before_anything(settings, tmp_path):
+    def orphan(embeddings, chunks, manifest):
+        chunks.replace_page_chunks(PAGES[0], [chunk_for(ROWS[0])])
+
+    summary = failed_precondition(settings, tmp_path, orphan)
+    assert "(1 orphaned-rows)" in summary.error
+    assert f"[orphaned-rows] {ROWS[1].chunk_id}" in summary.error
+
+
+def test_a_chunk_not_embedded_or_embedded_by_another_model_stops_the_run(
+    settings, tmp_path
+):
+    def gaps(embeddings, chunks, manifest):
+        extra = make_chunk(7)
+        chunks.replace_page_chunks(
+            PAGES[0],
+            [
+                chunk_for(ROWS[0]),
+                chunk_for(ROWS[1]),
+                replace(extra, chunk_id=f"{PAGES[0]}#7", url=PAGES[0]),
+            ],
+        )
+        other = replace(embedding_row_for(ROWS[2]), model="text-embedding-3-large")
+        embeddings.upsert(ROWS[2].chunk_id, [other])
+
+    summary = failed_precondition(settings, tmp_path, gaps)
+    assert "(1 model-mismatch, 1 not-embedded)" in summary.error
+
+
+def test_a_long_list_of_violations_is_cut_short(settings, tmp_path):
+    def reparse_everything(embeddings, chunks, manifest):
+        for url in PAGES:
+            page = [replace(chunk_for(r), text="new") for r in ROWS if r.url == url]
+            chunks.replace_page_chunks(url, page)
+
+    summary = failed_precondition(settings, tmp_path, reparse_everything)
+    assert f"({len(ROWS)} stale-hash)" in summary.error
+    assert (
+        f"; and {len(ROWS) - 5} more. `embed verify --complete` lists them all"
+        in summary.error
+    )
+
+
+@pytest.mark.network
+def test_failed_rows_do_not_stop_the_run(run_settings, collection, client):
+    """A failed row set counts as covered in `embed verify`: it is not
+    loaded, and the run goes ahead."""
+    fill(run_settings)
+    failed = replace(
+        embedding_row_for(ROWS[0]),
+        status="failed",
+        dimensions=None,
+        embedding=None,
+        error="boom",
+    )
+    with EmbeddingsStore(run_settings.embeddings_path) as embeddings:
+        embeddings.upsert(ROWS[0].chunk_id, [failed])
+    summary = index_run(run_settings)
+    assert summary.status == "completed"
+    assert client.count(collection, exact=True).count == len(ROWS) - 1
 
 
 def test_no_rows_of_the_model_stops_the_run(settings, tmp_path):

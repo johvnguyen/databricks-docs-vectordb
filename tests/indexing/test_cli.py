@@ -1,6 +1,7 @@
 import io
 import random
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from qdrant_client import models
 from databricks_docs_vectordb import cli
 from databricks_docs_vectordb.cli import IndexingSettings, main
 from databricks_docs_vectordb.embedding.provider import EmbeddingError
+from databricks_docs_vectordb.embedding.runner import text_hash
 from databricks_docs_vectordb.embedding.store import (
     EmbeddingRow,
     EmbeddingsStore,
@@ -70,7 +72,7 @@ def make_row(chunk: Chunk, *, seed: int = 0) -> EmbeddingRow:
         description=None,
         last_updated=None,
         page_sha256=chunk.page_sha256,
-        chunk_text_hash="cd" * 32,
+        chunk_text_hash=text_hash(chunk.text),
         embedded_text=chunk.text,
         token_count=8,
         provider="openai",
@@ -497,3 +499,12 @@ def test_check_treats_a_blank_key_as_missing(sidecar, monkeypatch, capsys):
         "note: real text and filtered queries skipped: no API key"
         in capsys.readouterr().out
     )
+
+
+def test_run_stops_when_embed_verify_is_not_clean(env, capsys):
+    fill(env)
+    with ChunkStore(env / "parsed.sqlite") as chunks:  # re-parsed since embedding
+        page = [make_chunk(PAGES[0], 0), make_chunk(PAGES[0], 1)]
+        chunks.replace_page_chunks(PAGES[0], [replace(page[0], text="new"), page[1]])
+    assert main(["index", "run"]) == 1
+    assert "failed: `embed verify --complete` is not clean" in capsys.readouterr().out

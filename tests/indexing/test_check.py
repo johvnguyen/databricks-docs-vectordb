@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from databricks_docs_vectordb.embedding.runner import text_hash
 from databricks_docs_vectordb.embedding.store import (
     EmbeddingRow,
     EmbeddingsStore,
@@ -86,7 +87,7 @@ def make_row(chunk: Chunk) -> EmbeddingRow:
         description=None,
         last_updated=None,
         page_sha256=chunk.page_sha256,
-        chunk_text_hash="cd" * 32,
+        chunk_text_hash=text_hash(chunk.text),
         embedded_text=chunk.text,
         token_count=8,
         provider=MODEL.provider,
