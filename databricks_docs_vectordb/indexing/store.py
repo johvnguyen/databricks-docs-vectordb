@@ -88,6 +88,15 @@ class StoredPoint(NamedTuple):
         return str(self.payload.get("section", ""))
 
 
+class Hit(NamedTuple):
+    """One search result: the point's ID, its score (similarity, higher is
+    better under both allowed distances, Q27) and its `PAYLOAD_FIELDS`."""
+
+    id: str
+    score: float
+    payload: dict[str, Any]
+
+
 def connect(settings: Settings) -> QdrantClient:
     """A REST client for the configured server, sending the API key."""
     with warnings.catch_warnings():
@@ -287,6 +296,58 @@ class QdrantStore:
             ),
             wait=True,
         )
+
+    def retrieve(self, name: str, ids: Sequence[str]) -> list[StoredPoint]:
+        """The points of `name` with these IDs, with their vectors, in one
+        request; an ID with no point is left out."""
+        records = self._client.retrieve(
+            collection_name=name,
+            ids=list(ids),
+            with_payload=list(PAYLOAD_FIELDS),
+            with_vectors=True,
+        )
+        return [
+            StoredPoint(str(r.id), dict(r.payload or {}), r.vector) for r in records
+        ]
+
+    def search(
+        self,
+        name: str,
+        vector: Sequence[float],
+        *,
+        limit: int,
+        exact: bool = False,
+        match: tuple[str, str] | None = None,
+    ) -> list[Hit]:
+        """The `limit` points nearest `vector`, best first, in one request.
+
+        Qdrant's default search (HNSW over the quantized vectors, at its
+        default search settings), or with `exact`, a full scan of the
+        original vectors with quantization ignored: the baseline (Q13).
+        `match` keeps only points whose payload field (`url` or `section`,
+        the indexed ones) equals the value.
+        """
+        response = self._client.query_points(
+            collection_name=name,
+            query=list(vector),
+            limit=limit,
+            query_filter=None
+            if match is None
+            else models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key=match[0], match=models.MatchValue(value=match[1])
+                    )
+                ]
+            ),
+            search_params=models.SearchParams(
+                exact=True, quantization=models.QuantizationSearchParams(ignore=True)
+            )
+            if exact
+            else None,
+            with_payload=list(PAYLOAD_FIELDS),
+        )
+        return [Hit(str(p.id), p.score, dict(p.payload or {})) for p in response.points]
 
     def collection_exists(self, name: str) -> bool:
         return self._client.collection_exists(name)

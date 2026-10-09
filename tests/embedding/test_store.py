@@ -11,6 +11,7 @@ from databricks_docs_vectordb.embedding.store import (
     EmbeddingSummary,
     ModelInfo,
     ModelKey,
+    RowContext,
     StoredVector,
     pack_embedding,
     unpack_embedding,
@@ -475,3 +476,21 @@ def test_embedding_summary_is_a_plain_namedtuple():
         "blob_len",
         "chunk_text_hash",
     )
+
+
+# -- lookup ----------------------------------------------------------------------
+
+
+def test_lookup_reads_back_a_rows_page_title_and_heading(store):
+    store.upsert(CHUNK_A, make_split(CHUNK_A, 2, heading_path="Delta > Merge"))
+    assert store.lookup(CHUNK_A, 1) == RowContext(
+        "https://docs.databricks.com/aws/en/delta/",
+        "What is Delta Lake?",
+        "Delta > Merge",
+    )
+
+
+def test_lookup_of_an_unknown_row_is_none(store):
+    store.upsert(CHUNK_A, [make_row(CHUNK_A)])
+    assert store.lookup(CHUNK_A, 1) is None
+    assert store.lookup(CHUNK_B, 0) is None
