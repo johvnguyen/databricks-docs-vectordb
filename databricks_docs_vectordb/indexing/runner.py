@@ -19,6 +19,7 @@ import signal
 import sys
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable, Container, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import batched
@@ -502,6 +503,7 @@ class RunSummary:
     orphans: tuple[tuple[str, int], ...]  # (chunk_id, sub_index) of rows skipped
     retries: int
     elapsed: float
+    deleted: tuple[str, ...] = ()  # old models' collections deleted (Q37)
     error: str | None = None  # why a failed run failed
 
     @property
@@ -511,7 +513,8 @@ class RunSummary:
 
 class Runner:
     """`index run`: compare the configured model's rows with what Qdrant
-    holds, ask the save question, save, then write.
+    holds, ask the save question, save, write, then delete any old models'
+    collections, once the new one passes `index verify --complete` (Q37).
 
     - Every Qdrant call goes through `RetryingStore`. There is no rate
       limiter or circuit breaker (Q19).
@@ -520,7 +523,9 @@ class Runner:
       `write` orders its deletes and batches so that every page is left
       current or due for replacement, which the next run's compare finds.
     - A connection that still fails after its retries, any other Qdrant
-      error, or an unanswered save question ends the run as `failed`.
+      error, an unanswered save question, or a new collection that fails
+      verification while old ones wait to be deleted ends the run as
+      `failed`. In the last case every old collection is kept.
     - Orphans are warned about as the compare reads them (`skip_orphans`),
       and again, by name, after the summary line.
 
@@ -569,6 +574,7 @@ class Runner:
         plan: Plan | None = None
         saved: list[Path] = []
         written: Written | None = None
+        deleted: list[str] = []
         status: RunStatus = "completed"
         error: str | None = None
         previous = _raise_on_sigterm() if handle_signals else None
@@ -607,6 +613,8 @@ class Runner:
             # The compare warned about each orphan; skipped quietly here.
             rows = (row for row in self._rows() if row.chunk_id in chunk_ids)
             written = write(self._qdrant, plan, rows, self._settings)
+            if plan.old_collections:
+                self._delete_old_collections(plan, deleted)
         except KeyboardInterrupt:
             status = "interrupted"
             logger.warning("interrupted: stopping now; run it again to finish")
@@ -632,6 +640,7 @@ class Runner:
             orphans=tuple((row.chunk_id, row.sub_index) for row in orphans),
             retries=self._retrying.retries,
             elapsed=self._clock() - started,
+            deleted=tuple(deleted),
             error=error,
         )
         _log_summary(summary)
@@ -639,6 +648,41 @@ class Runner:
 
     def _rows(self) -> Iterator[StoredVector]:
         return self._embeddings.ok_vectors(self._model)
+
+    def _delete_old_collections(self, plan: Plan, deleted: list[str]) -> None:
+        """Delete `plan.old_collections`, appending each to `deleted`, but
+        only once `plan.collection` passes the `index verify --complete`
+        checks (Q37). If it doesn't, raise `RunFailed` and keep them all."""
+        # Imported here, not at the top to prevent circular imports
+        from databricks_docs_vectordb.indexing.verify import verify_collection
+
+        logger.info(
+            "verifying %s before deleting the old collection(s) %s",
+            plan.collection,
+            ", ".join(plan.old_collections),
+        )
+        report = verify_collection(
+            self._qdrant,
+            self._settings,
+            self._model,
+            self._embeddings,
+            self._chunks,
+            self._manifest,
+            complete=True,
+        )
+        if not report.ok:
+            kinds = Counter(f.kind for f in report.violations)
+            raise RunFailed(
+                f"{plan.collection} failed `index verify --complete` ("
+                + ", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items()))
+                + "), so the old collection(s) were kept: "
+                + ", ".join(plan.old_collections)
+                + "; `index verify --complete` lists the problems"
+            )
+        for name in plan.old_collections:
+            self._qdrant.delete_collection(name)
+            deleted.append(name)
+            logger.info("deleted the old collection %s", name)
 
 
 def configured_dimensions(embeddings: EmbeddingsStore, model: ModelInfo) -> int:
@@ -712,8 +756,11 @@ def _log_summary(summary: RunSummary) -> None:
             )
         else:
             parts.append("the write did not finish; the next run picks it up")
-        if plan.old_collections:
-            parts.append(f"old collections kept: {', '.join(plan.old_collections)}")
+        if summary.deleted:
+            parts.append(f"old collections deleted: {', '.join(summary.deleted)}")
+        kept = [c for c in plan.old_collections if c not in summary.deleted]
+        if kept:
+            parts.append(f"old collections kept: {', '.join(kept)}")
     if summary.saved:
         parts.append(f"{len(summary.saved)} snapshot(s) saved")
     parts.append(f"{summary.retries} retries")

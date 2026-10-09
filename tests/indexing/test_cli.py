@@ -381,3 +381,14 @@ def test_verify_exits_1_naming_a_tampered_point(sidecar, client, name, capsys):
     out = capsys.readouterr().out
     assert f"[vector-mismatch] {tampered} (sub_index 0)" in out
     assert out.endswith("FAILED: 1 violations\n")
+
+
+@pytest.mark.network
+def test_run_deletes_old_models_collections_and_says_so(sidecar, client, name, capsys):
+    old = f"{name}_openai_text_embedding_3_large_4"
+    client.create_collection(
+        old, vectors_config=models.VectorParams(size=4, distance=models.Distance.COSINE)
+    )
+    assert main(["index", "run", "--no-save-old"]) == 0
+    assert f"deleted other models' collection(s): {old}" in capsys.readouterr().out
+    assert not client.collection_exists(old)

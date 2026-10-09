@@ -1191,3 +1191,89 @@ def test_no_rows_of_the_model_stops_the_run(settings, tmp_path):
 
 def test_exit_codes_match_embed_run():
     assert EXIT_CODES == {"completed": 0, "interrupted": 130, "failed": 1}
+
+
+# -- old models' collections (Q37) ------------------------------------------------
+
+
+def make_old_collection(client, name: str) -> None:
+    """A collection with one point, standing in for an old model's."""
+    client.create_collection(
+        name,
+        vectors_config=models.VectorParams(size=4, distance=models.Distance.COSINE),
+    )
+    client.upsert(
+        name, points=[models.PointStruct(id=1, vector=[1, 0, 0, 0])], wait=True
+    )
+
+
+@pytest.mark.network
+def test_old_collections_are_deleted_once_the_new_one_verifies(
+    run_settings, collection, client, name, logged
+):
+    old = f"{name}_openai_text_embedding_3_large_4"
+    unrelated = f"{name}x"  # starts with the prefix, but not `<prefix>_`
+    make_old_collection(client, old)
+    make_old_collection(client, unrelated)
+    fill(run_settings)
+    summary = index_run(run_settings, save_old=False)
+    assert (summary.status, summary.exit_code) == ("completed", 0)
+    assert summary.deleted == (old,)
+    assert not client.collection_exists(old)
+    assert client.collection_exists(unrelated)
+    assert client.count(collection, exact=True).count == len(ROWS)
+    messages = [r.getMessage() for r in logged.records]
+    verifying = next(i for i, m in enumerate(messages) if m.startswith("verifying"))
+    deleting = messages.index(f"deleted the old collection {old}")
+    assert verifying < deleting
+    [line] = [m for m in messages if m.startswith("completed in")]
+    assert f"old collections deleted: {old}" in line
+
+
+@pytest.mark.network
+def test_a_failed_verification_keeps_the_old_collections_and_exits_1(
+    run_settings, client, name, monkeypatch
+):
+    old = f"{name}_openai_text_embedding_3_large_4"
+    make_old_collection(client, old)
+    fill(run_settings)
+    # Only verification asks for the status; red is a violation there.
+    monkeypatch.setattr(QdrantStore, "collection_status", lambda self, name: "red")
+    summary = index_run(run_settings, save_old=False)
+    assert (summary.status, summary.exit_code) == ("failed", 1)
+    assert summary.deleted == ()
+    assert "failed `index verify --complete` (1 index-red)" in summary.error
+    assert f"the old collection(s) were kept: {old}" in summary.error
+    assert client.collection_exists(old)
+    assert summary.written == (0, len(PAGES), len(ROWS))  # the load itself went in
+
+
+@pytest.mark.network
+def test_ctrl_c_during_verification_keeps_the_old_collections(
+    run_settings, client, name, monkeypatch
+):
+    from databricks_docs_vectordb.indexing import verify
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    old = f"{name}_openai_text_embedding_3_large_4"
+    make_old_collection(client, old)
+    fill(run_settings)
+    monkeypatch.setattr(verify, "verify_collection", interrupted)
+    summary = index_run(run_settings, save_old=False)
+    assert (summary.status, summary.exit_code) == ("interrupted", 130)
+    assert summary.deleted == ()
+    assert client.collection_exists(old)
+
+
+@pytest.mark.network
+def test_with_no_old_collections_nothing_is_verified(run_settings, monkeypatch):
+    from databricks_docs_vectordb.indexing import verify
+
+    def never(*args, **kwargs):
+        raise AssertionError("verified with nothing to delete")
+
+    monkeypatch.setattr(verify, "verify_collection", never)
+    fill(run_settings)
+    assert index_run(run_settings).status == "completed"

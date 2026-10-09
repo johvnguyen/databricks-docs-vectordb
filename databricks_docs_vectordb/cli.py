@@ -1072,11 +1072,15 @@ def index_follow_up(summary: IndexSummary) -> list[str]:
             f"{len(plan.not_ok)} page(s) with embeddings left out: not ok in the "
             f"manifest (`{PROG} scrape status` shows why)"
         )
-    if plan is not None and plan.old_collections:
+    if summary.deleted:
         lines.append(
-            f"other models' collection(s) left in place: "
-            f"{', '.join(plan.old_collections)}"
+            f"deleted other models' collection(s): {', '.join(summary.deleted)}"
         )
+    kept = [
+        c for c in (plan.old_collections if plan else ()) if c not in summary.deleted
+    ]
+    if kept:
+        lines.append(f"other models' collection(s) left in place: {', '.join(kept)}")
     if summary.orphans:
         lines.append(
             f"{len(summary.orphans)} orphaned row(s) skipped, their chunk gone "
