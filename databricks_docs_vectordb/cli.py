@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import time
 from collections.abc import Iterator, Sequence
@@ -24,6 +25,8 @@ from databricks_docs_vectordb.embedding.verify import (
     format_report as format_embed_verify,
 )
 from databricks_docs_vectordb.embedding.verify import verify_embeddings
+from databricks_docs_vectordb.indexing.check import check_collection, embed_with
+from databricks_docs_vectordb.indexing.check import format_report as format_index_check
 from databricks_docs_vectordb.indexing.config import Settings as IndexingSettings
 from databricks_docs_vectordb.indexing.runner import RunFailed, configured_dimensions
 from databricks_docs_vectordb.indexing.runner import Runner as IndexRunner
@@ -433,6 +436,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also break the counts down by source/section",
     )
+
+    index_sub.add_parser(
+        "check",
+        help="run sanity checks on the collection and print a report for "
+        "developing retrieval",
+        description=(
+            "Four sanity checks, which report rather than pass or fail: "
+            "self-retrieval and index recall@10 (default search against exact) "
+            "over a seeded sample of stored points, with a warning when recall "
+            "is below 0.95; built-in questions embedded with the configured "
+            "model, each hit read back from embeddings.sqlite; and a few of "
+            "them again with a section filter and a url filter. The questions "
+            "need the model's API key (for OpenAI, OPENAI_API_KEY in .env) and "
+            "are skipped with a note without it. Needs QDRANT_API_KEY."
+        ),
+    )
     return parser
 
 
@@ -513,7 +532,8 @@ def main_embed(args: argparse.Namespace) -> int:
 def main_index(args: argparse.Namespace) -> int:
     # Every index command talks to Qdrant, so QDRANT_API_KEY is required.
     settings = IndexingSettings.load()
-    model = configured_model_info(EmbeddingSettings.load().model)
+    embedding = EmbeddingSettings.load()
+    model = configured_model_info(embedding.model)
     match args.index_command:
         case "run":
             return run_index_run(settings, model, args)
@@ -521,6 +541,8 @@ def main_index(args: argparse.Namespace) -> int:
             return run_index_status(settings, model, args)
         case "verify":
             return run_index_verify(settings, model, args)
+        case "check":
+            return run_index_check(settings, model, embedding)
     return 2
 
 
@@ -848,12 +870,23 @@ def load_provider_credentials(settings: EmbeddingSettings) -> None:
     over `.env` (no override).
     """
     load_dotenv(find_dotenv(usecwd=True), override=False)
-    missing = litellm.validate_environment(settings.model).get("missing_keys") or []
+    missing = missing_provider_keys(settings.model)
     if missing:
         raise CliError(
-            f"{', '.join(missing)} not set, needed to call {settings.model!r}; "
-            "add it to .env (or export it) and run again"
+            f"{', '.join(missing)} not set (or blank), needed to call "
+            f"{settings.model!r}; add it to .env (or export it) and run again"
         )
+
+
+def missing_provider_keys(model: str) -> list[str]:
+    """Treat a blank model API key as missing"""
+    blank = {name: value for name, value in os.environ.items() if not value.strip()}
+    for name in blank:
+        del os.environ[name]
+    try:
+        return litellm.validate_environment(model).get("missing_keys") or []
+    finally:
+        os.environ.update(blank)
 
 
 def run_embed_run(settings: EmbeddingSettings, args: argparse.Namespace) -> int:
@@ -1200,6 +1233,31 @@ def index_status_lines(
     else:
         lines.append("other models' collections: none")
     return lines
+
+
+def run_index_check(
+    settings: IndexingSettings, model: ModelInfo, embedding: EmbeddingSettings
+) -> int:
+    if not settings.embeddings_path.exists():
+        raise CliError(
+            f"no {settings.embeddings_path.name} at {settings.embeddings_path}; "
+            f"run `{PROG} embed run` first"
+        )
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+    litellm.suppress_debug_info = True
+    missing = missing_provider_keys(embedding.model)
+    embed = None if missing else embed_with(embedding.model)
+    with (
+        qdrant_errors(settings),
+        EmbeddingsStore(settings.embeddings_path) as embeddings,
+        QdrantStore(settings) as qdrant,
+    ):
+        try:
+            report = check_collection(qdrant, settings, model, embeddings, embed=embed)
+        except RunFailed as e:
+            raise CliError(str(e)) from e
+    print(format_index_check(report))
+    return 0
 
 
 if __name__ == "__main__":

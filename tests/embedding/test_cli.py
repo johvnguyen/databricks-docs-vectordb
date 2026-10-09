@@ -12,7 +12,7 @@ import pytest
 from litellm import exceptions as llm_errors
 from litellm.types.utils import Embedding, EmbeddingResponse
 
-from databricks_docs_vectordb.cli import main
+from databricks_docs_vectordb.cli import main, missing_provider_keys
 from databricks_docs_vectordb.embedding.config import Settings
 from databricks_docs_vectordb.embedding.store import EmbeddingsStore
 from databricks_docs_vectordb.parsing.store import Chunk, ChunkStore
@@ -402,6 +402,42 @@ def test_run_without_an_api_key_fails_before_any_request(env, monkeypatch, capsy
     assert fake.calls == []
     assert not (env / "embeddings.sqlite").exists()
     assert not (env / "logs").exists()
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_api_key_counts_as_missing(env, monkeypatch, capsys, blank):
+    add_pages(env, 2)
+    monkeypatch.setenv("OPENAI_API_KEY", blank)
+    fake = FakeLiteLLM()
+    monkeypatch.setattr(litellm, "aembedding", fake)
+
+    assert main(["embed", "run"]) == 1
+
+    assert "OPENAI_API_KEY not set (or blank)" in capsys.readouterr().err
+    assert fake.calls == []
+    assert not (env / "embeddings.sqlite").exists()
+
+
+def test_a_blank_api_key_in_dotenv_counts_as_missing(env, monkeypatch, capsys):
+    """An .env copied from .env.example without filling the key in."""
+    add_pages(env, 1)
+    monkeypatch.setenv("OPENAI_API_KEY", "placeholder")
+    monkeypatch.delenv("OPENAI_API_KEY")
+    (env.parent / ".env").write_text('OPENAI_API_KEY=""\n')
+    monkeypatch.setattr(litellm, "aembedding", FakeLiteLLM())
+
+    assert main(["embed", "run"]) == 1
+    assert "OPENAI_API_KEY not set (or blank)" in capsys.readouterr().err
+
+
+def test_checking_for_keys_puts_blank_variables_back(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("SOME_OTHER_BLANK", " ")
+    assert missing_provider_keys("text-embedding-3-small") == ["OPENAI_API_KEY"]
+    assert os.environ["OPENAI_API_KEY"] == ""
+    assert os.environ["SOME_OTHER_BLANK"] == " "
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert missing_provider_keys("text-embedding-3-small") == []
 
 
 def test_run_reads_the_api_key_from_dotenv_in_the_working_directory(

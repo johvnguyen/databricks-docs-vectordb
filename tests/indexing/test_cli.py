@@ -6,12 +6,16 @@ from pathlib import Path
 import pytest
 from qdrant_client import models
 
+from databricks_docs_vectordb import cli
 from databricks_docs_vectordb.cli import IndexingSettings, main
+from databricks_docs_vectordb.embedding.provider import EmbeddingError
 from databricks_docs_vectordb.embedding.store import (
     EmbeddingRow,
     EmbeddingsStore,
     pack_embedding,
 )
+from databricks_docs_vectordb.indexing import check
+from databricks_docs_vectordb.indexing.check import Question
 from databricks_docs_vectordb.indexing.runner import point_id
 from databricks_docs_vectordb.indexing.store import QdrantStore
 from databricks_docs_vectordb.parsing.store import Chunk, ChunkStore
@@ -149,7 +153,7 @@ def test_index_help_lists_its_subcommands(capsys):
     with pytest.raises(SystemExit) as exit:
         main(["index", "--help"])
     assert exit.value.code == 0
-    assert "{run,status,verify}" in capsys.readouterr().out
+    assert "{run,status,verify,check}" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -392,3 +396,104 @@ def test_run_deletes_old_models_collections_and_says_so(sidecar, client, name, c
     assert main(["index", "run", "--no-save-old"]) == 0
     assert f"deleted other models' collection(s): {old}" in capsys.readouterr().out
     assert not client.collection_exists(old)
+
+
+# -- index check --------------------------------------------------------------------
+
+QUESTIONS = tuple(Question(f"about page {i}", url) for i, url in enumerate(PAGES))
+
+
+def stored_vector(chunk_id: str) -> list[float]:
+    """What `make_row` stored for this chunk."""
+    rng = random.Random(f"{chunk_id} 0")
+    return [rng.gauss(0, 1) for _ in range(4)]
+
+
+@pytest.fixture
+def with_fake_provider(monkeypatch):
+    """An API key, test questions about PAGES, and a provider that embeds
+    each question as its page's first chunk."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(check, "QUESTIONS", QUESTIONS)
+    pages = {q.text: q.expected_url for q in QUESTIONS}
+    monkeypatch.setattr(
+        cli,
+        "embed_with",
+        lambda model: lambda texts: [stored_vector(f"{pages[t]}#0") for t in texts],
+    )
+
+
+def test_check_without_embeddings_says_to_embed_first(env, capsys):
+    assert main(["index", "check"]) == 1
+    assert "embed run" in capsys.readouterr().err
+
+
+def test_check_with_qdrant_unreachable_fails_at_once(env, monkeypatch, capsys):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    fill(env)
+    assert main(["index", "check"]) == 1
+    assert (
+        "error: Qdrant at http://localhost:1: ConnectError" in capsys.readouterr().err
+    )
+
+
+@pytest.mark.network
+def test_check_before_any_run_says_to_run_first(sidecar, monkeypatch, capsys):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert main(["index", "check"]) == 1
+    assert "does not exist yet: run `index run` first" in capsys.readouterr().err
+
+
+@pytest.mark.network
+def test_check_without_a_key_reports_the_first_two_checks_and_a_note(
+    sidecar, monkeypatch, capsys
+):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    main(["index", "run"])
+    capsys.readouterr()
+    assert main(["index", "check"]) == 0
+    out = capsys.readouterr().out
+    assert f"1. self-retrieval: {POINTS} of {POINTS} sampled points" in out
+    assert "2. index recall@10: 1.0000" in out
+    assert "note: real text and filtered queries skipped: no API key" in out
+    assert "3. real text queries" not in out
+
+
+@pytest.mark.network
+def test_check_with_a_key_reports_all_four(sidecar, with_fake_provider, capsys):
+    main(["index", "run"])
+    capsys.readouterr()
+    assert main(["index", "check"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("expected page at rank 1") == len(QUESTIONS)
+    assert f"      1. 1.0000  {PAGES[0]}  -" in out  # its own chunk, read back
+    assert "the expected page came back for 3 of 3 questions" in out
+    assert out.count("every hit matches") == 2 * check.FILTERED
+
+
+@pytest.mark.network
+def test_a_failed_embedding_is_a_note_not_a_crash(
+    sidecar, with_fake_provider, monkeypatch, capsys
+):
+    def refuse(texts):
+        raise EmbeddingError("invalid API key")
+
+    monkeypatch.setattr(cli, "embed_with", lambda model: refuse)
+    main(["index", "run"])
+    capsys.readouterr()
+    assert main(["index", "check"]) == 0
+    out = capsys.readouterr().out
+    assert "1. self-retrieval" in out
+    assert "embedding the questions failed: invalid API key" in out
+
+
+@pytest.mark.network
+def test_check_treats_a_blank_key_as_missing(sidecar, monkeypatch, capsys):
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    main(["index", "run"])
+    capsys.readouterr()
+    assert main(["index", "check"]) == 0
+    assert (
+        "note: real text and filtered queries skipped: no API key"
+        in capsys.readouterr().out
+    )

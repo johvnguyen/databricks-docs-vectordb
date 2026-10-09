@@ -19,7 +19,7 @@ threshold.
    page's; whether every hit matches.
 
 3 and 4 need the embedding model's API key, and are skipped with a note
-without one.
+without one, or if embedding the questions fails.
 """
 
 import asyncio
@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from databricks_docs_vectordb.embedding import provider
+from databricks_docs_vectordb.embedding.provider import EmbeddingError
 from databricks_docs_vectordb.embedding.store import EmbeddingsStore, ModelInfo
 from databricks_docs_vectordb.indexing.config import Settings
 from databricks_docs_vectordb.indexing.runner import (
@@ -200,7 +201,13 @@ def check_collection(
             "embedding model (for OpenAI, OPENAI_API_KEY in .env)"
         )
         return report
-    vectors = embed([q.text for q in QUESTIONS])
+    try:
+        vectors = embed([q.text for q in QUESTIONS])
+    except EmbeddingError as e:
+        report.notes.append(
+            f"real text and filtered queries skipped: embedding the questions failed: {e}"
+        )
+        return report
     if any(len(v) != dimensions for v in vectors):
         raise RunFailed(
             f"the query embeddings have {sorted({len(v) for v in vectors})} "
