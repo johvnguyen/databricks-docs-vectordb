@@ -135,6 +135,9 @@ leftover `test_` collections. Tests against the sidecar use throwaway
   (`scraping`, `parsing`, `embedding`, `indexing`) and the CLI in `cli.py`
 - `scripts/run_pipeline.sh`: runs every stage in order, from an empty `data/`
   or an existing one, then verifies and checks the collection
+- `scripts/clean_data.sh`: resets everything after asking: deletes every file
+  under `data/` (keeping the folders) and every Qdrant collection, through
+  `scripts/clear_qdrant.py`
 - `scripts/snapshot_qdrant.py`: saves a snapshot of the Qdrant collections to
   `data/qdrant_snapshots/` (`uv run python scripts/snapshot_qdrant.py`; its
   docstring shows how to restore one)
