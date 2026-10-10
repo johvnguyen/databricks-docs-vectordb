@@ -133,6 +133,9 @@ leftover `test_` collections. Tests against the sidecar use throwaway
 
 - `databricks_docs_vectordb/`: the package, one subpackage per stage
   (`scraping`, `parsing`, `embedding`, `indexing`) and the CLI in `cli.py`
+- `scripts/snapshot_qdrant.py`: saves a snapshot of the Qdrant collections to
+  `data/qdrant_snapshots/` (`uv run python scripts/snapshot_qdrant.py`; its
+  docstring shows how to restore one)
 - `tests/`: one test directory per stage
 - `data/`: everything the pipeline writes (not committed)
 - `design-docs/`: the project plan and the per-phase design docs (kept out
