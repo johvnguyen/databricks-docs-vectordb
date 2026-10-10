@@ -71,7 +71,8 @@ def assemble_inputs(
         )
 
     encoding = get_encoding(model)
-    tokens = encoding.encode(chunk.text)
+    # Special-token text is ordinary text here, as in `count_tokens`.
+    tokens = encoding.encode(chunk.text, disallowed_special=())
     _, offsets = encoding.decode_with_offsets(tokens)
 
     def char_offset(token_index: int) -> int:
