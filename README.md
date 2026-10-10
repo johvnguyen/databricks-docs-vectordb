@@ -133,6 +133,8 @@ leftover `test_` collections. Tests against the sidecar use throwaway
 
 - `databricks_docs_vectordb/`: the package, one subpackage per stage
   (`scraping`, `parsing`, `embedding`, `indexing`) and the CLI in `cli.py`
+- `scripts/run_pipeline.sh`: runs every stage in order, from an empty `data/`
+  or an existing one, then verifies and checks the collection
 - `scripts/snapshot_qdrant.py`: saves a snapshot of the Qdrant collections to
   `data/qdrant_snapshots/` (`uv run python scripts/snapshot_qdrant.py`; its
   docstring shows how to restore one)
