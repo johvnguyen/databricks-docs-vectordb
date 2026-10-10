@@ -135,6 +135,10 @@ leftover `test_` collections. Tests against the sidecar use throwaway
   (`scraping`, `parsing`, `embedding`, `indexing`) and the CLI in `cli.py`
 - `scripts/run_pipeline.sh`: runs every stage in order, from an empty `data/`
   or an existing one, then verifies and checks the collection
+- `demo.ipynb`: a basic RAG demo. Ask a question and an OpenAI chat model answers
+  from its 10 most similar rows, citing them; or search, and see the 10 rows mapped
+  back to their pages. Open it in VS Code with the Jupyter extension, and pick the
+  project's `.venv` as the kernel (`ipykernel` is a dev dependency)
 - `scripts/clean_data.sh`: resets everything after asking: deletes every file
   under `data/` (keeping the folders) and every Qdrant collection, through
   `scripts/clear_qdrant.py`
@@ -154,6 +158,6 @@ These phases are deferred to a future day:
   set of questions with expected pages, metrics and a baseline. `index check`
   is a starting point.
 - **RAG system:** an external LLM answering from retrieved docs, with
-  citations, behind a simple chat UI.
+  citations, behind a simple chat UI. `demo.ipynb` is a basic version of it.
 - **Maintenance and operations:** scheduled re-runs and monitoring. Every
   stage already updates incrementally.

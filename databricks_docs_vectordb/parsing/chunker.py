@@ -245,6 +245,27 @@ def _apply_overlap(plans: Sequence[_ChunkPlan], settings: Settings) -> list[str]
     return final
 
 
+def own_texts(chunks: Sequence[Chunk], settings: Settings) -> list[str]:
+    """Each chunk's own text, without the overlap `chunk_page` prepended:
+    the inverse of `_apply_overlap`, for showing what a chunk itself says.
+
+    `chunks` is a whole page, in order, as stored (`ChunkStore.get_chunks`).
+    Each prefix is rebuilt the way it was added, so a text that doesn't start
+    with it (one stored under other overlap settings, say) comes back whole.
+    """
+    owns: list[str] = []
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            owns.append(chunk.text)
+            continue
+        if settings.overlap_mode == "heading":
+            prefix = _prefix_with_heading(chunks[i - 1].heading_path, "")
+        else:
+            prefix = _prefix_with_tail(owns[-1], "", settings.overlap_size)
+        owns.append(chunk.text.removeprefix(prefix))
+    return owns
+
+
 def _prefix_with_tail(previous_text: str, text: str, overlap_size: int) -> str:
     tail = previous_text[-overlap_size:] if overlap_size else ""
     return f"{tail}{_OVERLAP_JOIN}{text}" if tail else text

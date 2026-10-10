@@ -481,12 +481,19 @@ def test_embedding_summary_is_a_plain_namedtuple():
 # -- lookup ----------------------------------------------------------------------
 
 
-def test_lookup_reads_back_a_rows_page_title_and_heading(store):
-    store.upsert(CHUNK_A, make_split(CHUNK_A, 2, heading_path="Delta > Merge"))
+def test_lookup_reads_back_a_rows_page_title_heading_and_text(store):
+    rows = [
+        make_row(
+            CHUNK_A, i, 2, heading_path="Delta > Merge", embedded_text=f"slice {i}"
+        )
+        for i in range(2)
+    ]
+    store.upsert(CHUNK_A, rows)
     assert store.lookup(CHUNK_A, 1) == RowContext(
         "https://docs.databricks.com/aws/en/delta/",
         "What is Delta Lake?",
         "Delta > Merge",
+        "slice 1",
     )
 
 

@@ -1,6 +1,10 @@
 import pytest
 
-from databricks_docs_vectordb.parsing.chunker import chunk_page, overlap_ceiling
+from databricks_docs_vectordb.parsing.chunker import (
+    chunk_page,
+    overlap_ceiling,
+    own_texts,
+)
 from databricks_docs_vectordb.parsing.config import Settings
 from databricks_docs_vectordb.parsing.html_walker import (
     CodeBlock,
@@ -282,6 +286,52 @@ def test_char_count_reflects_the_final_text_including_overlap():
     chunks = chunk_page(nodes, meta(), settings(overlap_size=20))
     assert chunks[1].char_count == len(chunks[1].text)
     assert chunks[1].char_count > len("## Second\n\n" + "x" * 80)
+
+
+# -- own_texts: the overlap taken back off ---------------------------------
+
+
+def test_own_texts_takes_the_tail_overlap_back_off():
+    nodes = [h(2, "First"), p(80), h(2, "Second"), p(80), h(2, "Third"), p(80, "y")]
+    s = settings(overlap_size=20)
+    chunks = chunk_page(nodes, meta(), s)
+    assert own_texts(chunks, s) == [
+        "## First\n\n" + "x" * 80,
+        "## Second\n\n" + "x" * 80,
+        "## Third\n\n" + "y" * 80,
+    ]
+
+
+def test_own_texts_handles_a_previous_chunk_shorter_than_the_overlap():
+    # "## A\n\nxx" is 8 characters, so all of it is the next chunk's overlap.
+    nodes = [h(2, "A"), p(2), h(2, "Second"), p(80)]
+    s = settings(overlap_size=50)
+    chunks = chunk_page(nodes, meta(), s)
+    assert chunks[1].text.startswith("## A\n\nxx\n\n## Second")
+    assert own_texts(chunks, s)[1] == "## Second\n\n" + "x" * 80
+
+
+def test_own_texts_takes_the_heading_overlap_back_off():
+    nodes = [p(80), h(2, "First"), p(80), h(2, "Second"), p(80)]
+    s = settings(overlap_mode="heading")
+    chunks = chunk_page(nodes, meta(), s)
+    assert own_texts(chunks, s)[1:] == [
+        "## First\n\n" + "x" * 80,
+        "## Second\n\n" + "x" * 80,
+    ]
+
+
+def test_own_texts_with_no_overlap_is_the_text():
+    nodes = [h(2, "First"), p(80), h(2, "Second"), p(80)]
+    s = settings(overlap_size=0)
+    chunks = chunk_page(nodes, meta(), s)
+    assert own_texts(chunks, s) == [c.text for c in chunks]
+
+
+def test_own_texts_leaves_text_stored_under_other_settings_whole():
+    nodes = [h(2, "First"), p(80), h(2, "Second"), p(80)]
+    chunks = chunk_page(nodes, meta(), settings(overlap_size=20))
+    assert own_texts(chunks, settings(overlap_size=30)) == [c.text for c in chunks]
 
 
 # -- overlap_ceiling: what verify.py checks char_count against -------------
