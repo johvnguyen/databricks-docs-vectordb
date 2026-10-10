@@ -81,6 +81,22 @@ def test_count_tokens_agrees_with_encoding_the_text_directly():
     assert count_tokens(text, OPENAI_SMALL) == len(encoding.encode(text))
 
 
+@pytest.mark.parametrize(
+    "special", sorted(tiktoken.encoding_for_model(OPENAI_SMALL).special_tokens_set)
+)
+def test_special_token_text_is_counted_as_ordinary_text(special):
+    """A chat template on a fine-tuning page spells `<|endoftext|>`."""
+    text = f"Assistant: {{{{ message['content'] }}}} {special}"
+    encoding = tiktoken.encoding_for_model(OPENAI_SMALL)
+    assert count_tokens(text, OPENAI_SMALL) == len(
+        encoding.encode(text, disallowed_special=())
+    )
+    # More than the one token the special token itself would be.
+    assert count_tokens(text, OPENAI_SMALL) > len(
+        encoding.encode(text, allowed_special={special})
+    )
+
+
 # -- backfill_token_counts ---------------------------------------------------
 
 
@@ -90,6 +106,14 @@ def test_backfill_writes_real_counts_for_every_null_row(store):
     updated = backfill_token_counts(store, OPENAI_SMALL)
     assert updated == 1
     assert store.get_chunks(URL_A)[0].token_count == 2
+
+
+def test_backfill_counts_a_chunk_that_spells_a_special_token(store):
+    """What stopped `parse run` on the sgc-finetune-qwen3.5-0.8b tutorial."""
+    text = "Assistant: {{ message['content'] }} <|endoftext|>"
+    store.replace_page_chunks(URL_A, [make_chunk(0, text=text)])
+    assert backfill_token_counts(store, OPENAI_SMALL) == 1
+    assert store.get_chunks(URL_A)[0].token_count == count_tokens(text, OPENAI_SMALL)
 
 
 def test_backfill_on_an_empty_store_does_nothing(store):

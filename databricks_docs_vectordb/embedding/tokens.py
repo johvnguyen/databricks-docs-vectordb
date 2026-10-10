@@ -38,8 +38,14 @@ def get_encoding(model: str) -> tiktoken.Encoding:
 
 
 def count_tokens(text: str, model: str) -> int:
-    """How many tokens `model`'s tokenizer would bill `text` as."""
-    return len(get_encoding(model).encode(text))
+    """How many tokens `model`'s tokenizer would bill `text` as.
+
+    Text that spells a special token, such as `<|endoftext|>` in a chat
+    template on a fine-tuning page, is counted as the ordinary text it is
+    (`disallowed_special=()`). tiktoken would otherwise refuse the whole
+    chunk, and counting it as text never undercounts.
+    """
+    return len(get_encoding(model).encode(text, disallowed_special=()))
 
 
 def backfill_token_counts(store: ChunkStore, model: str) -> int:

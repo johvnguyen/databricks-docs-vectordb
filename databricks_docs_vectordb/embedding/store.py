@@ -161,11 +161,15 @@ class StoredVector(NamedTuple):
 
 
 class RowContext(NamedTuple):
-    """Where one row's text came from: what a search hit is mapped back to."""
+    """Where one row's text came from, and the text itself: what a search
+    hit is mapped back to."""
 
     url: str
     doc_title: str
     heading_path: str
+    # What was embedded: the title, heading and section lines and a blank
+    # line (`assemble.build_context`), then the chunk text or one slice of it.
+    embedded_text: str
 
 
 class EmbeddingsStore:
@@ -402,17 +406,19 @@ class EmbeddingsStore:
         ]
 
     def lookup(self, chunk_id: str, sub_index: int) -> RowContext | None:
-        """The page, title and heading of the row `(chunk_id, sub_index)`, or
-        None if there is no such row: how a Qdrant hit, which carries only
-        that key, is read back (Phase 4's Q5)."""
+        """The page, title, heading and embedded text of the row `(chunk_id,
+        sub_index)`, or None if there is no such row: how a Qdrant hit, which
+        carries only that key, is read back (Phase 4's Q5)."""
         row = self._conn.execute(
-            "SELECT url, doc_title, heading_path FROM embeddings"
+            "SELECT url, doc_title, heading_path, embedded_text FROM embeddings"
             " WHERE chunk_id = ? AND sub_index = ?",
             (chunk_id, sub_index),
         ).fetchone()
         if row is None:
             return None
-        return RowContext(row["url"], row["doc_title"], row["heading_path"])
+        return RowContext(
+            row["url"], row["doc_title"], row["heading_path"], row["embedded_text"]
+        )
 
     def ok_vectors(self, model: ModelInfo) -> Iterator[StoredVector]:
         """A `StoredVector` per `ok` row embedded by `model`, for Phase 4's

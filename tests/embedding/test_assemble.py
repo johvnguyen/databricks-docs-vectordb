@@ -112,6 +112,23 @@ def test_oversized_slices_cover_the_whole_text_in_order():
     assert position == len(chunk.text)
 
 
+def test_special_token_text_is_embedded_as_ordinary_text():
+    chunk = make_chunk("Assistant: {{ message['content'] }} <|endoftext|>")
+    [only] = assemble(chunk)
+    assert only.text.endswith(chunk.text)
+    assert only.token_count == count_tokens(only.text, MODEL)
+
+
+def test_an_oversized_chunk_with_special_token_text_splits_without_loss():
+    words = numbered_text(5000).split()
+    words.insert(2500, "<|endoftext|>")
+    chunk = make_chunk(" ".join(words))
+    context = build_context(chunk)
+    bodies = [p.text[len(context) :] for p in assemble(chunk, 500, 0)]
+    assert len(bodies) > 1
+    assert "".join(bodies) == chunk.text
+
+
 def test_overlap_tokens_repeat_at_each_internal_boundary():
     chunk = make_chunk(numbered_text(5000))
     context = build_context(chunk)
